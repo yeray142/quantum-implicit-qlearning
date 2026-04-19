@@ -3,13 +3,11 @@
 import math
 
 import numpy as np
-import pytest
 import torch
 
 from quantum_iql.buffer import ReplayBuffer
 from quantum_iql.config import IQLConfig, NetworkConfig
 from quantum_iql.trainer import IQLTrainer
-
 
 # ---------------------------------------------------------------------------
 # Helpers

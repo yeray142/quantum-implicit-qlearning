@@ -138,10 +138,6 @@ def test_critic_loss_zero_for_perfect_prediction():
     _, v_target, q, _ = make_networks()
     batch = make_batch()
 
-    with torch.no_grad():
-        v_next = v_target(batch.next_observations)
-        td_target = batch.rewards + 0.99 * v_next
-
     # Patch q1 (and q2) to always output the target
     with torch.no_grad():
         # Zero out all Q params and bias to the target mean (approximate)

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import random
 
+import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
-import gymnasium as gym
 
 
 def soft_update(target: nn.Module, source: nn.Module, tau: float) -> None:

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
-from omegaconf import OmegaConf, DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 
 @dataclass
@@ -47,7 +46,7 @@ class IQLConfig:
     eval_interval: int = 10_000
     eval_episodes: int = 10
     wandb_project: str = "quantum-iql"
-    wandb_run_name: Optional[str] = None
+    wandb_run_name: str | None = None
     wandb_offline: bool = False
 
     # --- Reproducibility ---

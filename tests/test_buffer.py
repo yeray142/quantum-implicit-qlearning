@@ -4,8 +4,7 @@ import numpy as np
 import pytest
 import torch
 
-from quantum_iql.buffer import Batch, ReplayBuffer
-
+from quantum_iql.buffer import ReplayBuffer
 
 OBS_DIM, ACT_DIM = 11, 3
 

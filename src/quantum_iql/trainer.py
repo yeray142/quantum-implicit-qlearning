@@ -25,8 +25,8 @@ from typing import Any
 import numpy as np
 import torch
 import torch.optim as optim
-import wandb
 
+import wandb
 from quantum_iql.buffer import Batch, ReplayBuffer
 from quantum_iql.config import IQLConfig
 from quantum_iql.losses import actor_loss, critic_loss, value_loss

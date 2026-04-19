@@ -5,10 +5,10 @@ import torch
 import torch.nn as nn
 
 from quantum_iql.networks import (
-    build_mlp,
-    ValueNetwork,
-    CriticNetwork,
     ActorNetwork,
+    CriticNetwork,
+    ValueNetwork,
+    build_mlp,
 )
 
 B, OBS_DIM, ACT_DIM = 8, 11, 3  # Hopper-like dims

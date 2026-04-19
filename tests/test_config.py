@@ -1,7 +1,6 @@
 """Tests for the config system."""
 
-import pytest
-from quantum_iql.config import IQLConfig, NetworkConfig, load_config
+from quantum_iql.config import IQLConfig, load_config
 
 
 def test_defaults():

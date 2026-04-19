@@ -10,7 +10,7 @@ to call a quantum-aware factory instead of `build_mlp`.
 from __future__ import annotations
 
 import math
-from typing import Sequence
+from collections.abc import Sequence
 
 import torch
 import torch.nn as nn
