@@ -46,7 +46,7 @@ def test_load_config_with_overrides(tmp_path):
 
 def test_load_hopper_config():
     cfg = load_config("configs/iql_hopper.yaml")
-    assert cfg.dataset_id == "mujoco/hopper/medium-v2"
+    assert cfg.dataset_id == "mujoco/hopper/medium-v0"
     assert cfg.env_id == "Hopper-v4"
     assert cfg.use_twin_critic is True
     assert cfg.device == "auto"
