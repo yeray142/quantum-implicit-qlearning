@@ -15,9 +15,22 @@ Design notes
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Protocol
 
 import numpy as np
 import torch
+
+
+# ---------------------------------------------------------------------------
+# Protocol for episode objects (matches minari.EpisodeData duck-type)
+# ---------------------------------------------------------------------------
+
+class EpisodeData(Protocol):
+    observations: Any   # array-like, shape (T+1, obs_dim)
+    actions: Any        # array-like, shape (T, act_dim)
+    rewards: Any        # array-like, shape (T,)
+    terminations: Any   # array-like, shape (T,)
+    truncations: Any    # array-like, shape (T,)
 
 
 # Batch container
@@ -60,7 +73,7 @@ class ReplayBuffer:
         self._size = 0  # number of valid transitions
 
     # Writing
-    def add_from_episode(self, episode: object) -> None:
+    def add_from_episode(self, episode: EpisodeData) -> None:
         """Ingest one episode from a Minari dataset.
 
         Args:

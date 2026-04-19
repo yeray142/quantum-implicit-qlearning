@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 
 import wandb
-
 from quantum_iql.buffer import load_minari_dataset
 from quantum_iql.config import load_config
 from quantum_iql.trainer import IQLTrainer

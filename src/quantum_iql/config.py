@@ -54,11 +54,11 @@ class IQLConfig:
     device: str = "auto"  # "auto" | "cpu" | "cuda"
 
 
-def _parse_overrides(overrides: list[str]) -> dict:
-    """Convert ["key=value", ...] strings into a nested dict via OmegaConf."""
+def _parse_overrides(overrides: list[str]) -> DictConfig:
+    """Convert ["key=value", ...] strings into a DictConfig via OmegaConf."""
     if not overrides:
-        return {}
-    return OmegaConf.to_container(OmegaConf.from_dotlist(overrides), resolve=True)
+        return OmegaConf.create({})
+    return OmegaConf.from_dotlist(overrides)  # type: ignore[return-value]
 
 
 def load_config(path: str, overrides: list[str] | None = None) -> IQLConfig:
@@ -75,9 +75,9 @@ def load_config(path: str, overrides: list[str] | None = None) -> IQLConfig:
     Example:
         cfg = load_config("configs/iql_hopper.yaml", ["tau=0.9", "seed=1"])
     """
-    base: DictConfig = OmegaConf.structured(IQLConfig)
-    from_file: DictConfig = OmegaConf.load(path)
-    merged: DictConfig = OmegaConf.merge(base, from_file)
+    base = OmegaConf.structured(IQLConfig)
+    from_file = OmegaConf.load(path)
+    merged = OmegaConf.merge(base, from_file)
 
     if overrides:
         merged = OmegaConf.merge(merged, _parse_overrides(overrides))

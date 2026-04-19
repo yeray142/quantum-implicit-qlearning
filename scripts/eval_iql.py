@@ -33,7 +33,7 @@ import torch
 from quantum_iql.buffer import ReplayBuffer
 from quantum_iql.config import load_config
 from quantum_iql.trainer import IQLTrainer
-from quantum_iql.utils import get_device, make_env, set_seed
+from quantum_iql.utils import get_device, set_seed
 
 
 def parse_args() -> argparse.Namespace:
