@@ -147,6 +147,13 @@ class QuantumValueNetwork(nn.Module):
         sigma: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute V_psi(s) for a batch of states, returns shape (B,)."""
+
+        if s.shape[-1] != self.obs_dim:
+            raise ValueError(
+                f"Expected last dimension of `s` to be obs_dim={self.obs_dim}, "
+                f"but got {s.shape[-1]} (full shape: {tuple(s.shape)})."
+            )
+
         _mu    = mu    if mu    is not None else self.mu
         _sigma = sigma if sigma is not None else self.sigma
 
