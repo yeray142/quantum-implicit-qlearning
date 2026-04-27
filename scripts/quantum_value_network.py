@@ -171,7 +171,8 @@ class QuantumValueNetwork(nn.Module):
             for i in range(B)
         ])
 
-        return self.a * expvals + self.b
+        expvals = expvals.float()                 # float64 → float32
+        return (self.a * expvals + self.b).unsqueeze(-1)
 
     def parameter_count(self) -> dict:
         quantum = self.theta.numel() + self.w.numel()

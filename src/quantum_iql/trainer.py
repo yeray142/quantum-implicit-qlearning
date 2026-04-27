@@ -27,11 +27,11 @@ import torch
 import torch.optim as optim
 
 import wandb
-from quantum_iql.buffer import Batch, ReplayBuffer
-from quantum_iql.config import IQLConfig
-from quantum_iql.losses import actor_loss, critic_loss, value_loss
-from quantum_iql.networks import ActorNetwork, CriticNetwork, ValueNetwork
-from quantum_iql.utils import get_device, hard_update, soft_update
+from src.quantum_iql.buffer import Batch, ReplayBuffer
+from src.quantum_iql.config import IQLConfig
+from src.quantum_iql.losses import actor_loss, critic_loss, value_loss
+from src.quantum_iql.networks import ActorNetwork, CriticNetwork, ValueNetwork
+from src.quantum_iql.utils import get_device, hard_update, soft_update
 
 
 class IQLTrainer:
