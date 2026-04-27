@@ -20,7 +20,6 @@ from typing import Any, Protocol
 import numpy as np
 import torch
 
-
 # ---------------------------------------------------------------------------
 # Protocol for episode objects (matches minari.EpisodeData duck-type)
 # ---------------------------------------------------------------------------

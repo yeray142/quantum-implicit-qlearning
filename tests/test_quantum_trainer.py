@@ -11,26 +11,27 @@ Run with:
 from __future__ import annotations
 
 import math
-import sys
 import os
+import sys
 
+import numpy as np
 import pytest
 import torch
-import numpy as np
 
 # ── Make the project importable from the repo root ──────────────────────────
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
-from src.quantum_iql.buffer import Batch, ReplayBuffer
-from src.quantum_iql.quantum_config import (
+from quantum_value_network import QuantumValueNetwork
+
+from quantum_iql.buffer import Batch, ReplayBuffer
+from quantum_iql.quantum_config import (
     LayerwiseScheduleEntry,
     QuantumIQLConfig,
     QuantumNetConfig,
 )
-from src.quantum_iql.quantum_trainer import QuantumIQLTrainer, _grad_norm
-from src.quantum_iql.quantum_value_network import QuantumValueNetwork
-
+from quantum_iql.quantum_trainer import QuantumIQLTrainer, _grad_norm
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -166,7 +167,7 @@ class TestQuantumNetworkInitialisation:
         obs = torch.randn(5, OBS_DIM)
         with torch.no_grad():
             v = qnet(obs)
-        assert v.shape == (5,), f"Expected (5,), got {v.shape}"
+        assert v.shape == (5, 1), f"Expected (5, 1), got {v.shape}"
 
     def test_set_active_layers_bounds(self):
         qnet = QuantumValueNetwork(
@@ -214,17 +215,31 @@ class TestQuantumTrainerConstruction:
             trainer = _make_trainer(cfg, buf)
             assert isinstance(trainer.actor_net, ActorNetwork)
 
-    def test_value_target_always_classical_mlp(self):
-        """V̄ is a classical MLP in both modes (efficiency + simplicity)."""
+    def test_value_target_matches_value_net_architecture(self):
+        """V̄ mirrors value_net architecture so soft_update operates on matching shapes.
+
+        - quantum mode: both value_net and value_target are QuantumValueNetwork
+        - classical mode: both are ValueNetwork (classical MLP)
+        In both cases V̄ must have requires_grad=False on all parameters.
+        """
         from quantum_iql.networks import ValueNetwork
         buf = _make_buffer()
-        for mode in ("classical", "quantum"):
-            cfg = _make_quantum_config(mode=mode)
-            trainer = _make_trainer(cfg, buf)
-            assert isinstance(trainer.value_target, ValueNetwork)
-            # V̄ must not require gradients
-            for p in trainer.value_target.parameters():
-                assert not p.requires_grad
+
+        cfg_q = _make_quantum_config(mode="quantum")
+        trainer_q = _make_trainer(cfg_q, buf)
+        assert isinstance(trainer_q.value_target, QuantumValueNetwork), (
+            "quantum mode: value_target must be QuantumValueNetwork"
+        )
+        for p in trainer_q.value_target.parameters():
+            assert not p.requires_grad
+
+        cfg_c = _make_quantum_config(mode="classical")
+        trainer_c = _make_trainer(cfg_c, buf)
+        assert isinstance(trainer_c.value_target, ValueNetwork), (
+            "classical mode: value_target must be ValueNetwork"
+        )
+        for p in trainer_c.value_target.parameters():
+            assert not p.requires_grad
 
 
 class TestGradientFlow:
@@ -417,8 +432,7 @@ class TestRunningStatsRefresh:
         qnet: QuantumValueNetwork = trainer.value_net  # type: ignore
 
         trainer._refresh_running_stats(step=1)   # should trigger refresh
-        # After refresh mu is recomputed from buffer; may or may not differ for random data
-        # Just check it's finite
+        # After refresh mu is recomputed from buffer; just check it's finite
         assert torch.isfinite(qnet.mu).all()
         assert torch.isfinite(qnet.sigma).all()
         assert (qnet.sigma > 0).all()

@@ -43,31 +43,25 @@ Design decisions
 
 from __future__ import annotations
 
-import math
 import time
 from typing import Any
 
-import numpy as np
 import torch
 import torch.optim as optim
 
-import wandb
-from src.quantum_iql.buffer import Batch, ReplayBuffer
-from src.quantum_iql.config import IQLConfig
-from src.quantum_iql.losses import actor_loss, critic_loss, value_loss
-from src.quantum_iql.networks import ActorNetwork, CriticNetwork, ValueNetwork
-from src.quantum_iql.trainer import IQLTrainer
-from src.quantum_iql.utils import get_device, hard_update, soft_update
+# Quantum components (from issue #7 — lives in scripts/)
+from quantum_value_network import QuantumValueNetwork
 
-# Quantum components (from issue #7)
-# scripts/ is not an installed package, so we add it to sys.path explicitly.
-import sys as _sys, os as _os
-_sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), "..", "..", "scripts"))
-from scripts.quantum_value_network import QuantumValueNetwork
+import wandb
+
+from .buffer import Batch, ReplayBuffer
+from .losses import value_loss
+from .networks import ActorNetwork, CriticNetwork, ValueNetwork
 
 # Hybrid config (this issue)
-from src.quantum_iql.quantum_config import QuantumIQLConfig
-
+from .quantum_config import QuantumIQLConfig
+from .trainer import IQLTrainer
+from .utils import hard_update
 
 # ---------------------------------------------------------------------------
 # Helper: gradient-norm utility
@@ -251,36 +245,36 @@ class QuantumIQLTrainer(IQLTrainer):
 
     def update_value(self, batch: Batch) -> dict[str, float]:
         """Gradient step on V_ψ (quantum or classical).
- 
+
         Adds optional gradient clipping for quantum parameters and collects
         quantum-specific diagnostic metrics when ``log_quantum_metrics=True``.
- 
+
         Returns:
             ``{"loss/value": float}`` plus, when mode=quantum:
             ``{"quantum/grad_norm_theta": float, "quantum/grad_norm_w": float}``
         """
         cfg: QuantumIQLConfig = self._qcfg
         self.value_optimizer.zero_grad()
- 
+
         # ── forward + backward (parameter-shift handled by PennyLane) ─────
         # QuantumValueNetwork.forward now returns (B, 1) float32 directly,
         # matching the ValueNetwork contract — no wrapper needed.
         loss = value_loss(self.value_net, self.critic_net, batch, cfg.tau)
         loss.backward()
- 
+
         metrics: dict[str, float] = {"loss/value": loss.item()}
- 
+
         # ── quantum diagnostics & clipping ────────────────────────────────
         if self._is_quantum and cfg.log_quantum_metrics:
             qnet: QuantumValueNetwork = self.value_net  # type: ignore[assignment]
             metrics["quantum/grad_norm_theta"] = _grad_norm(qnet.theta)
             metrics["quantum/grad_norm_w"]     = _grad_norm(qnet.w)
- 
+
         if self._is_quantum and cfg.quantum_grad_clip > 0.0:
             torch.nn.utils.clip_grad_norm_(
                 self.value_net.parameters(), cfg.quantum_grad_clip
             )
- 
+
         self.value_optimizer.step()
         return metrics
 

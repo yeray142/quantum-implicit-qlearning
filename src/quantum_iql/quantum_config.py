@@ -10,8 +10,7 @@ from dataclasses import dataclass, field
 
 from omegaconf import OmegaConf
 
-from src.quantum_iql.config import IQLConfig, NetworkConfig
-
+from .config import IQLConfig
 
 # ---------------------------------------------------------------------------
 # Layerwise warm-up schedule entry

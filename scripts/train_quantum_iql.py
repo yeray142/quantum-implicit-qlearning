@@ -34,15 +34,19 @@ Ablation: vary expectile level across both arms:
 from __future__ import annotations
 
 import argparse
-import sys
+import os as _os
+
+# Ensure scripts/ is on the path so quantum_value_network (issue #7) is importable
+import sys as _sys
 
 import wandb
 
-from src.quantum_iql.buffer import load_minari_dataset
-from src.quantum_iql.quantum_config import QuantumIQLConfig, load_quantum_config
-from src.quantum_iql.quantum_trainer import QuantumIQLTrainer
-from src.quantum_iql.utils import get_device, make_env, set_seed
+_sys.path.insert(0, _os.path.join(_os.path.dirname(__file__)))
 
+from quantum_iql.buffer import load_minari_dataset
+from quantum_iql.quantum_config import QuantumIQLConfig, load_quantum_config
+from quantum_iql.quantum_trainer import QuantumIQLTrainer
+from quantum_iql.utils import get_device, make_env, set_seed
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -124,7 +128,7 @@ def main(argv: list[str] | None = None) -> None:
     # ── Config ─────────────────────────────────────────────────────────────
     cfg = load_quantum_config(args.config, overrides=args.overrides)
     _check_mode(cfg)
-    device = get_device(cfg.device)
+    get_device(cfg.device)
     _print_config_summary(cfg)
 
     # ── Reproducibility ─────────────────────────────────────────────────────
