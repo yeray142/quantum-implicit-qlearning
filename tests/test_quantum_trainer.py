@@ -416,7 +416,6 @@ class TestRunningStatsRefresh:
         trainer = _make_trainer(cfg, buf)
         qnet: QuantumValueNetwork = trainer.value_net  # type: ignore
 
-        mu_before = qnet.mu.clone()
         trainer._refresh_running_stats(step=1)   # should trigger refresh
         # After refresh mu is recomputed from buffer; may or may not differ for random data
         # Just check it's finite
