@@ -146,7 +146,7 @@ class QuantumValueNetwork(nn.Module):
         mu: torch.Tensor | None = None,
         sigma: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Compute V_psi(s) for a batch of states, returns shape (B,)."""
+        """Compute V_psi(s) for a batch of states, returns shape (B,) in float32."""
 
         if s.shape[-1] != self.obs_dim:
             raise ValueError(
@@ -171,7 +171,10 @@ class QuantumValueNetwork(nn.Module):
             for i in range(B)
         ])
 
-        return self.a * expvals + self.b
+        # PennyLane returns float64; cast to float32 to match the PyTorch pipeline.
+        expvals = expvals.float()
+
+        return self.a * expvals + self.b  # shape (B,)
 
     def parameter_count(self) -> dict:
         quantum = self.theta.numel() + self.w.numel()

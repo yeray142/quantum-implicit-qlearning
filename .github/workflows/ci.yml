@@ -29,7 +29,7 @@ jobs:
         run: ruff check src/ tests/ --fix
 
       - name: Type-check with mypy
-        run: mypy src/quantum_iql --ignore-missing-imports
+        run: mypy --package quantum_iql --ignore-missing-imports
 
       - name: Run tests
         run: pytest tests/ --cov=quantum_iql --cov-report=term-missing

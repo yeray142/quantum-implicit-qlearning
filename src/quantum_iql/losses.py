@@ -12,8 +12,8 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from quantum_iql.buffer import Batch
-from quantum_iql.networks import ActorNetwork, CriticNetwork, ValueNetwork
+from .buffer import Batch
+from .networks import ActorNetwork, CriticNetwork, ValueNetwork
 
 
 # Primitive: expectile regression
