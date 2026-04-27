@@ -55,7 +55,7 @@ from quantum_value_network import QuantumValueNetwork
 import wandb
 
 from .buffer import Batch, ReplayBuffer
-from .losses import value_loss
+from .losses import critic_loss, value_loss
 from .networks import ActorNetwork, CriticNetwork, ValueNetwork
 
 # Hybrid config (this issue)
@@ -257,9 +257,22 @@ class QuantumIQLTrainer(IQLTrainer):
         self.value_optimizer.zero_grad()
 
         # ── forward + backward (parameter-shift handled by PennyLane) ─────
-        # QuantumValueNetwork.forward now returns (B, 1) float32 directly,
-        # matching the ValueNetwork contract — no wrapper needed.
-        loss = value_loss(self.value_net, self.critic_net, batch, cfg.tau)
+        # QuantumValueNetwork.forward returns (B,) to stay compatible with the
+        # network's own tests. We wrap it to (B,1) here so value_loss sees the
+        # same shape contract as the classical ValueNetwork.
+        if self._is_quantum:
+            import torch.nn as _nn
+            class _Unsqueeze(_nn.Module):
+                def __init__(self, net):
+                    super().__init__()
+                    self.net = net
+
+                def forward(self, obs):
+                    return self.net(obs).unsqueeze(-1)
+            _vnet = _Unsqueeze(self.value_net)  # type: ignore[assignment]
+        else:
+            _vnet = self.value_net  # type: ignore[assignment]
+        loss = value_loss(_vnet, self.critic_net, batch, cfg.tau)  # type: ignore[arg-type]
         loss.backward()
 
         metrics: dict[str, float] = {"loss/value": loss.item()}
@@ -277,6 +290,39 @@ class QuantumIQLTrainer(IQLTrainer):
 
         self.value_optimizer.step()
         return metrics
+
+    # ------------------------------------------------------------------
+    # Critic update (overrides to fix value_target shape in quantum mode)
+    # ------------------------------------------------------------------
+
+    def update_critic(self, batch: Batch) -> dict[str, float]:
+        """Single gradient step on Q_theta.
+
+        When mode=quantum, value_target is a QuantumValueNetwork returning
+        (B,) but critic_loss expects (B,1). We wrap it the same way as in
+        update_value so the Bellman target has the correct shape.
+        """
+        self.critic_optimizer.zero_grad()
+
+        if self._is_quantum:
+            import torch.nn as _nn
+
+            class _Unsqueeze(_nn.Module):
+                def __init__(self, net):
+                    super().__init__()
+                    self.net = net
+
+                def forward(self, obs):
+                    return self.net(obs).unsqueeze(-1)
+
+            _vtarget = _Unsqueeze(self.value_target)  # type: ignore[assignment]
+        else:
+            _vtarget = self.value_target  # type: ignore[assignment]
+
+        loss = critic_loss(self.critic_net, _vtarget, batch, self._qcfg.gamma)  # type: ignore[arg-type]
+        loss.backward()
+        self.critic_optimizer.step()
+        return {"loss/critic": loss.item()}
 
     # ------------------------------------------------------------------
     # Quantum-specific diagnostics

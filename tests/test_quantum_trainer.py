@@ -167,7 +167,7 @@ class TestQuantumNetworkInitialisation:
         obs = torch.randn(5, OBS_DIM)
         with torch.no_grad():
             v = qnet(obs)
-        assert v.shape == (5, 1), f"Expected (5, 1), got {v.shape}"
+        assert v.shape == (5,), f"Expected (5,), got {v.shape}"
 
     def test_set_active_layers_bounds(self):
         qnet = QuantumValueNetwork(
