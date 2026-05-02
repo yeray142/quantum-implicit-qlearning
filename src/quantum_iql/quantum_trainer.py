@@ -158,13 +158,14 @@ class QuantumIQLTrainer(IQLTrainer):
                 n_layers=qv.n_layers,
                 obs_dim=obs_dim,
                 device_name=qv.device_name,
+                diff_method=qv.diff_method,
                 running_stats=qv.running_stats,
             ).to(self.device)
             self._is_quantum = True
             print(
                 f"[QuantumIQLTrainer] mode=quantum  →  {self.value_net!r}\n"
                 f"  PennyLane device : {qv.device_name}\n"
-                f"  diff_method      : parameter-shift\n"
+                f"  diff_method      : {qv.diff_method}\n"
                 f"  obs_dim          : {obs_dim}  →  {qv.n_qubits} qubits "
                 f"({'pad' if obs_dim < qv.n_qubits else 'truncate' if obs_dim > qv.n_qubits else 'exact'})"
             )
@@ -197,6 +198,7 @@ class QuantumIQLTrainer(IQLTrainer):
                 n_layers=qv.n_layers,
                 obs_dim=self.buffer.obs_dim,
                 device_name=qv.device_name,
+                diff_method=qv.diff_method,
                 running_stats=qv.running_stats,
             ).to(self.device)
             hard_update(self.value_target, self.value_net)
@@ -256,10 +258,28 @@ class QuantumIQLTrainer(IQLTrainer):
         cfg: QuantumIQLConfig = self._qcfg
         self.value_optimizer.zero_grad()
 
-        # ── forward + backward (parameter-shift handled by PennyLane) ─────
-        # QuantumValueNetwork.forward returns (B,) to stay compatible with the
-        # network's own tests. We wrap it to (B,1) here so value_loss sees the
-        # same shape contract as the classical ValueNetwork.
+        # ── quantum: subsample a smaller mini-batch for the circuit ───────
+        # The full batch (cfg.batch_size=256) would take ~15ms × 256 = 3.8s
+        # per forward pass on CPU simulation.  We subsample cfg.quantum_batch_size
+        # samples so each step stays tractable while the Q and actor updates
+        # (below) still use the full batch for better gradient estimates.
+        if self._is_quantum and cfg.quantum_batch_size < batch.observations.shape[0]:
+            idx = torch.randperm(batch.observations.shape[0], device=batch.observations.device)[
+                :cfg.quantum_batch_size
+            ]
+            vbatch = Batch(
+                observations=batch.observations[idx],
+                actions=batch.actions[idx],
+                rewards=batch.rewards[idx],
+                next_observations=batch.next_observations[idx],
+                dones=batch.dones[idx],
+            )
+        else:
+            vbatch = batch
+
+        # ── forward + backward ────────────────────────────────────────────
+        # QuantumValueNetwork.forward returns (B,); wrap to (B,1) to match
+        # the shape contract expected by value_loss.
         if self._is_quantum:
             import torch.nn as _nn
             class _Unsqueeze(_nn.Module):
@@ -272,7 +292,7 @@ class QuantumIQLTrainer(IQLTrainer):
             _vnet = _Unsqueeze(self.value_net)  # type: ignore[assignment]
         else:
             _vnet = self.value_net  # type: ignore[assignment]
-        loss = value_loss(_vnet, self.critic_net, batch, cfg.tau)  # type: ignore[arg-type]
+        loss = value_loss(_vnet, self.critic_net, vbatch, cfg.tau)  # type: ignore[arg-type]
         loss.backward()
 
         metrics: dict[str, float] = {"loss/value": loss.item()}

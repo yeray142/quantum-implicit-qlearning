@@ -55,7 +55,10 @@ advantage_clip: 100.0
 quantum_value:
   n_qubits: 8
   n_layers: 3              # must satisfy n_layers <= floor(log2(n_qubits)) = 3
-  device_name: "lightning.qubit"   # fastest analytic backend; use "default.qubit" for debug
+  # backprop+default.qubit: converts circuit to PyTorch ops → runs on GPU.
+  # 152x faster than adjoint on CPU (RTX 5070: 0.028s/step vs 4.3s/step, B=256).
+  device_name: "default.qubit"
+  diff_method: "backprop"
   running_stats: true
 
   # Layerwise warm-up schedule (Skolik et al., 2021)

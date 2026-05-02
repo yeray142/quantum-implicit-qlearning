@@ -47,29 +47,56 @@ def _cz_entangler(n_qubits: int) -> None:
         qml.CZ(wires=[q, q + 1])
 
 
-# PennyLane QNode
-def _build_qnode(n_qubits: int, n_layers: int, device_name: str = "lightning.qubit"):
-    """Construct the PennyLane QNode for one forward pass."""
+# PennyLane QNode — batched via parameter broadcasting
+def _build_qnode(
+    n_qubits: int,
+    n_layers: int,
+    device_name: str = "default.qubit",
+    diff_method: str = "backprop",
+):
+    """Construct a batched PennyLane QNode using parameter broadcasting.
+
+    The circuit accepts xs of shape (B, n_qubits) and evaluates all B samples
+    in a single QNode call via PennyLane parameter broadcasting (introduced in
+    PennyLane 0.26, supported by lightning.qubit + adjoint since 0.36).
+
+    For each qubit q in each DRU layer l the angle tensor has shape (B, 3):
+        angles[k, j] = theta[l, q, j] + w[l, q, j] * xs[k, q]
+    Passing (B,)-shaped tensors to qml.Rot triggers broadcasting over B circuits.
+
+    Gradient flow:  angles = f(theta, w, xs)  is tracked by PyTorch autograd
+    before the QNode sees it, so all three inputs receive gradients correctly
+    regardless of the diff_method chosen.
+
+    diff_method notes:
+      "adjoint" (default) — computes all parameter gradients in one backward
+        sweep; recommended for lightning.qubit.
+      "parameter-shift"   — 2 evals per parameter; use only if adjoint is
+        unavailable for the chosen device.
+    """
     dev = qml.device(device_name, wires=n_qubits)
 
-    @qml.qnode(dev, interface="torch", diff_method="parameter-shift")
+    @qml.qnode(dev, interface="torch", diff_method=diff_method)
     def circuit(
         theta: torch.Tensor,   # (n_layers, n_qubits, 3)
         w: torch.Tensor,       # (n_layers, n_qubits, 3)
-        xs: torch.Tensor,      # (n_qubits,)
+        xs: torch.Tensor,      # (B, n_qubits)  ← full batch
         active_layers: int,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor:         # returns (B,) via parameter broadcasting
         _cz_preamble(n_qubits)
 
         for layer_idx in range(active_layers):
-            th = theta[layer_idx]
-            ww = w[layer_idx]
+            th = theta[layer_idx]   # (n_qubits, 3)
+            ww = w[layer_idx]       # (n_qubits, 3)
             for q in range(n_qubits):
-                angles = th[q] + ww[q] * xs[q % xs.shape[0]]
-                qml.Rot(angles[0], angles[1], angles[2], wires=q)
+                # xs[:, q]          → (B,)
+                # th[q] / ww[q]     → (3,)
+                # angles            → (B, 3) via broadcasting
+                angles = th[q] + ww[q] * xs[:, q % xs.shape[1]].unsqueeze(-1)
+                qml.Rot(angles[:, 0], angles[:, 1], angles[:, 2], wires=q)
             _cz_entangler(n_qubits)
 
-        return qml.expval(qml.PauliZ(0))
+        return qml.expval(qml.PauliZ(0))   # (B,) when xs is batched
 
     return circuit
 
@@ -89,7 +116,8 @@ class QuantumValueNetwork(nn.Module):
         n_qubits: int = 8,
         n_layers: int = 3,
         obs_dim: int = 11,
-        device_name: str = "lightning.qubit",
+        device_name: str = "default.qubit",
+        diff_method: str = "backprop",
         running_stats: bool = True,
     ) -> None:
         super().__init__()
@@ -116,7 +144,8 @@ class QuantumValueNetwork(nn.Module):
             self.mu = None
             self.sigma = None
 
-        self._circuit = _build_qnode(n_qubits, n_layers, device_name)
+        self._diff_method = diff_method
+        self._circuit = _build_qnode(n_qubits, n_layers, device_name, diff_method)
 
     def set_active_layers(self, n: int) -> None:
         """Set number of active DRU layers for layerwise warm-up (Skolik et al., 2021).
@@ -154,6 +183,8 @@ class QuantumValueNetwork(nn.Module):
                 f"but got {s.shape[-1]} (full shape: {tuple(s.shape)})."
             )
 
+        _device = s.device
+
         _mu    = mu    if mu    is not None else self.mu
         _sigma = sigma if sigma is not None else self.sigma
 
@@ -166,12 +197,19 @@ class QuantumValueNetwork(nn.Module):
         elif self.obs_dim > self.n_qubits:
             xs = xs[:, :self.n_qubits]
 
-        expvals = torch.stack([
-            self._circuit(self.theta, self.w, xs[i], self._active_layers)
-            for i in range(B)
-        ])
+        # Device handling depends on the diff method:
+        #   backprop  — converts the circuit to PyTorch ops, so it runs on
+        #               whatever device the tensors live on (GPU if available).
+        #               Keep tensors on _device; no CPU transfer needed.
+        #   adjoint / parameter-shift — PennyLane simulates on CPU.
+        #               Move inputs to CPU; move output back afterwards.
+        if self._diff_method == "backprop":
+            expvals = self._circuit(self.theta, self.w, xs, self._active_layers)
+        else:
+            expvals = self._circuit(
+                self.theta.cpu(), self.w.cpu(), xs.cpu(), self._active_layers
+            ).to(_device)
 
-        # PennyLane returns float64; cast to float32 to match the PyTorch pipeline.
         expvals = expvals.float()
 
         return self.a * expvals + self.b  # shape (B,)

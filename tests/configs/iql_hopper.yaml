@@ -1,0 +1,48 @@
+# IQL config for hopper-medium-v0
+
+dataset_id: "mujoco/hopper/medium-v0"
+env_id: "Hopper-v4"
+
+# IQL hyperparameters
+tau: 0.7        # expectile level — use 0.9+ for AntMaze tasks
+beta: 3.0       # advantage inverse temperature
+gamma: 0.99
+polyak: 0.005
+
+# Optimization
+lr_v: 3.0e-4
+lr_q: 3.0e-4
+lr_actor: 3.0e-4
+batch_size: 256
+num_steps: 1_000_000
+warmup_steps: 0
+
+# Networks
+value_net:
+  hidden_dims: [256, 256]
+  activation: relu
+  layer_norm: false
+
+critic_net:
+  hidden_dims: [256, 256]
+  activation: relu
+  layer_norm: false
+
+actor_net:
+  hidden_dims: [256, 256]
+  activation: relu
+  layer_norm: false
+
+use_twin_critic: true
+advantage_clip: 100.0
+
+# Logging
+log_interval: 1000
+eval_interval: 10000
+eval_episodes: 10
+wandb_project: "quantum-iql"
+wandb_offline: false
+
+# Reproducibility
+seed: 0
+device: "auto"

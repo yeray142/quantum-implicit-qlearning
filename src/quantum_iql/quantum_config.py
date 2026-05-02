@@ -46,7 +46,11 @@ class QuantumNetConfig:
     """
     n_qubits: int = 8
     n_layers: int = 3
-    device_name: str = "lightning.qubit"
+    # default.qubit + backprop converts the circuit to PyTorch ops and runs on
+    # GPU when tensors are on CUDA → 150x faster than adjoint on CPU.
+    # Use "lightning.qubit" + "adjoint" only if backprop is unsupported.
+    device_name: str = "default.qubit"
+    diff_method: str = "backprop"
     running_stats: bool = True
     layerwise_schedule: list[LayerwiseScheduleEntry] = field(
         default_factory=lambda: [
@@ -91,6 +95,13 @@ class QuantumIQLConfig(IQLConfig):
     # Optimisation
     lr_quantum: float = 3e-4
     quantum_grad_clip: float = 1.0     # max-norm clipping for quantum params
+    # Quantum value update uses a smaller mini-batch to keep each step tractable.
+    # The classical Q and actor updates always use the full cfg.batch_size.
+    # With backprop+GPU the full batch is fast (~0.028s/step for B=256).
+    # Only reduce this if running on CPU without GPU support.
+    #   backprop+GPU  B=256: ~0.028s/step → 1M steps ≈  7.8h  ← default
+    #   adjoint+CPU   B=4:   ~0.20s/step  → 100k steps ≈ 5.6h  ← CPU fallback
+    quantum_batch_size: int = 256
 
     # Diagnostics
     log_quantum_metrics: bool = True
