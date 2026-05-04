@@ -1,0 +1,8 @@
+guppylang==0.21.14
+guppylang-internals==0.35.0
+hugr==0.16.0
+pytket==2.16.0
+qnexus==0.43.1
+selene-core==0.2.9
+selene-hugr-qis-compiler==0.2.10
+selene-sim==0.2.15

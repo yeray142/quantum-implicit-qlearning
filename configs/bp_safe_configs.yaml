@@ -1,0 +1,56 @@
+# BP-safe configuration grid for Q-IQL cost estimation on Helios / Selene.
+#
+# BP-safety constraint (issue #10):
+#   - Local observable only (Pauli-Z on qubit 0).
+#   - Layer count L ≤ floor(log2(n)) — polynomial gradient-variance guarantee.
+#   - n capped at 98 (Helios physical qubit count).
+#
+# Generated grid: n ∈ {2,4,6,8,10,12,16,20,24,32}, L ∈ {1..floor(log2(n))}, C ∈ {100,500,1000}.
+
+shots: [100, 500, 1000]
+
+budgets:
+  helios_hqc:   1000    # hardware budget threshold
+  emulator_hqc: 10000   # Selene / Helios emulator threshold
+
+configs:
+  - {n_qubits: 2,  n_layers: 1}          # floor(log2(2))  = 1
+
+  - {n_qubits: 4,  n_layers: 1}          # floor(log2(4))  = 2
+  - {n_qubits: 4,  n_layers: 2}
+
+  - {n_qubits: 6,  n_layers: 1}          # floor(log2(6))  = 2
+  - {n_qubits: 6,  n_layers: 2}
+
+  - {n_qubits: 8,  n_layers: 1}          # floor(log2(8))  = 3  ← current Q-IQL config
+  - {n_qubits: 8,  n_layers: 2}
+  - {n_qubits: 8,  n_layers: 3}
+
+  - {n_qubits: 10, n_layers: 1}          # floor(log2(10)) = 3
+  - {n_qubits: 10, n_layers: 2}
+  - {n_qubits: 10, n_layers: 3}
+
+  - {n_qubits: 12, n_layers: 1}          # floor(log2(12)) = 3
+  - {n_qubits: 12, n_layers: 2}
+  - {n_qubits: 12, n_layers: 3}
+
+  - {n_qubits: 16, n_layers: 1}          # floor(log2(16)) = 4
+  - {n_qubits: 16, n_layers: 2}
+  - {n_qubits: 16, n_layers: 3}
+  - {n_qubits: 16, n_layers: 4}
+
+  - {n_qubits: 20, n_layers: 1}          # floor(log2(20)) = 4
+  - {n_qubits: 20, n_layers: 2}
+  - {n_qubits: 20, n_layers: 3}
+  - {n_qubits: 20, n_layers: 4}
+
+  - {n_qubits: 24, n_layers: 1}          # floor(log2(24)) = 4
+  - {n_qubits: 24, n_layers: 2}
+  - {n_qubits: 24, n_layers: 3}
+  - {n_qubits: 24, n_layers: 4}
+
+  - {n_qubits: 32, n_layers: 1}          # floor(log2(32)) = 5
+  - {n_qubits: 32, n_layers: 2}
+  - {n_qubits: 32, n_layers: 3}
+  - {n_qubits: 32, n_layers: 4}
+  - {n_qubits: 32, n_layers: 5}
