@@ -5,7 +5,7 @@ Architecture:
   - Nearest-neighbour CZ entangling layers between re-uploading blocks
   - Fixed CZ preamble for initial entanglement (no BP depth contribution)
   - Identity-block initialisation: w^(i) = -theta^(i) so U = I at t=0
-  - Local Pauli-Z readout on qubit 0 only (Cerezo et al., 2021 Thm 2(ii))
+  - Local Pauli-Z readsout on qubit 0 only (Cerezo et al., 2021 Thm 2(ii))
   - Trainable affine output head: V(s) = a * <Z_0> + b
 
 Quantised network: V(s)   — classical Q(s,a) and pi(a|s) unchanged.
@@ -119,6 +119,7 @@ class QuantumValueNetwork(nn.Module):
         device_name: str = "default.qubit",
         diff_method: str = "backprop",
         running_stats: bool = True,
+        use_pre_encoder: bool = True,
     ) -> None:
         super().__init__()
 
@@ -135,6 +136,12 @@ class QuantumValueNetwork(nn.Module):
         self.theta, self.w = _identity_block_init(n_layers, n_qubits)
         self.a = nn.Parameter(torch.ones(1))
         self.b = nn.Parameter(torch.zeros(1))
+
+        self.use_pre_encoder = use_pre_encoder
+        if use_pre_encoder and obs_dim > n_qubits:
+            self.pre_encode = nn.Linear(obs_dim, n_qubits, bias=True)
+        else:
+            self.pre_encode = None  # type: ignore[assignment]
 
         self._running_stats = running_stats
         if running_stats:
@@ -195,7 +202,10 @@ class QuantumValueNetwork(nn.Module):
             pad = torch.zeros(B, self.n_qubits - self.obs_dim, device=xs.device, dtype=xs.dtype)
             xs = torch.cat([xs, pad], dim=-1)
         elif self.obs_dim > self.n_qubits:
-            xs = xs[:, :self.n_qubits]
+            if self.use_pre_encoder:
+                xs = self.pre_encode(xs)  # (B, n_qubits) — learned projection
+            else:
+                xs = xs[:, :self.n_qubits]  # legacy truncation, for reproducibility
 
         # Device handling depends on the diff method:
         #   backprop  — converts the circuit to PyTorch ops, so it runs on
@@ -217,12 +227,15 @@ class QuantumValueNetwork(nn.Module):
     def parameter_count(self) -> dict:
         quantum = self.theta.numel() + self.w.numel()
         classical = self.a.numel() + self.b.numel()
+        if self.pre_encode is not None:
+            classical += self.pre_encode.weight.numel() + self.pre_encode.bias.numel()
         return {"quantum": quantum, "classical_head": classical, "total": quantum + classical}
 
     def __repr__(self) -> str:
         pc = self.parameter_count()
         return (
             f"QuantumValueNetwork(n_qubits={self.n_qubits}, n_layers={self.n_layers}, "
-            f"obs_dim={self.obs_dim}, active_layers={self._active_layers}, "
+            f"obs_dim={self.obs_dim}, use_pre_encoder={self.use_pre_encoder}, "
+            f"active_layers={self._active_layers}, "
             f"params={pc['total']} [{pc['quantum']} quantum + {pc['classical_head']} head])"
         )

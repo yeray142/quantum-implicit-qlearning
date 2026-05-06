@@ -13,6 +13,8 @@ Phase 2 (repair):
                             The primary repair experiment.
   quantum-fixed-warmup   -- Fix A only; keeps the Skolik warm-up schedule.
                             Isolates the effect of affine-head initialisation.
+  quantum-fixed-c        -- Fix A + Fix B + Fix C: V-gradient freeze for first 1500 steps.
+                            Allows Q to bootstrap toward r + γ·374 before V begins moving.
 
 Usage
 -----
@@ -20,7 +22,7 @@ Usage
   python experiments/ablation_study.py
 
   # Repair experiments on Hopper, seeds 0-7:
-  python experiments/ablation_study.py --modes quantum-fixed --seeds 0 1 2 3 4 5 6 7
+  python experiments/ablation_study.py --modes quantum-fixed quantum-fixed-c --seeds 0 1 2 3 4 5 6 7
 
   # Transfer: quantum-fixed + baseline on Walker2d:
   python experiments/ablation_study.py --modes quantum-fixed constant-v classical \\
@@ -52,13 +54,15 @@ from quantum_iql.quantum_config import LayerwiseScheduleEntry, QuantumIQLConfig,
 from quantum_iql.trainer import IQLTrainer
 from quantum_iql.utils import make_env, set_seed
 
+from experiment_utils import estimate_sps, estimate_runtime, measure_sps, print_grid_summary
+
 _EXPERIMENTS_DIR = Path(__file__).resolve().parent
 _BC_PATH = _EXPERIMENTS_DIR / "benchmark_comparison" / "benchmark_comparison.py"
 import importlib.util as _ilu
 _bc_spec = _ilu.spec_from_file_location("benchmark_comparison", _BC_PATH)
-_bc = _ilu.module_from_spec(_bc_spec)   # type: ignore[arg-type]
+_bc = _ilu.module_from_spec(_bc_spec)
 sys.modules["benchmark_comparison"] = _bc
-_bc_spec.loader.exec_module(_bc)        # type: ignore[union-attr]
+_bc_spec.loader.exec_module(_bc)
 BenchmarkTrainer = _bc.BenchmarkTrainer
 _count_params    = _bc._count_params
 
@@ -94,19 +98,10 @@ LOG_INTERVAL = 1_000
 WANDB_PROJECT= "quantum-iql"
 DEEP_HIDDEN  = [8, 8, 8]
 
-_SPS_ESTIMATE = {
-    "constant-v":             300.0,
-    "classical":              175.0,
-    "classical-deep":         280.0,
-    "quantum-no-warmup":       12.2,
-    "quantum-fixed":           12.2,
-    "quantum-fixed-warmup":    12.2,
-}
-
-ALL_MODES = list(_SPS_ESTIMATE.keys())
-
-
-# ── ConstantValueNetwork ──────────────────────────────────────────────────────
+ALL_MODES = [
+    "constant-v", "classical", "classical-deep",
+    "quantum-no-warmup", "quantum-fixed", "quantum-fixed-warmup", "quantum-fixed-c",
+]
 
 class ConstantValueNetwork(nn.Module):
     """V(s) = constant for all s. No trainable parameters."""
@@ -292,6 +287,14 @@ def _build_config(mode: str, seed: int, env_cfg: dict) -> QuantumIQLConfig:
         cfg.quantum_value = _quantum_cfg(use_warmup=True, total_steps=NUM_STEPS)
         cfg.quantum_batch_size = 256
 
+    elif mode == "quantum-fixed-c":
+        cfg.mode = "quantum"
+        cfg.quantum_value = _quantum_cfg(use_warmup=False, total_steps=NUM_STEPS)
+        cfg.quantum_batch_size = 256
+        # Fix C: freeze V gradient for first v_freeze_steps to mitigate cold-start overshoot
+        cfg.fix_c_enabled  = True
+        cfg.v_freeze_steps = 1500
+
     else:
         raise ValueError(f"Unknown mode: {mode!r}")
 
@@ -343,7 +346,7 @@ def run_ablation(mode: str, seed: int, env_name: str,
         trainer = ConstantVIQLTrainer(cfg, buffer, gymnasium_env, checkpoint_dir)
         v_params = 0
 
-    elif mode in ("quantum-fixed", "quantum-fixed-warmup"):
+    elif mode in ("quantum-fixed", "quantum-fixed-warmup", "quantum-fixed-c"):
         trainer = QuantumFixedTrainer(
             cfg, buffer, gymnasium_env, checkpoint_dir,
             v_init=v_init, a_init=a_init,
@@ -357,8 +360,18 @@ def run_ablation(mode: str, seed: int, env_name: str,
     wandb.config.update({
         "value_net_params": v_params,
         "v_init_actual": v_init if "fixed" in mode else None,
+        "fix_c_enabled": cfg.fix_c_enabled if "fixed-c" in mode else None,
+        "v_freeze_steps": cfg.v_freeze_steps if "fixed-c" in mode else None,
     }, allow_val_change=True)
     print(f"  value_net params : {v_params}")
+
+    # ── Inline SPS measurement (first run of this mode in this process) ─────────
+    # Re-use measured value if already cached; otherwise run 50-step warmup.
+    from experiment_utils import _MEASURED_SPS as _sps_cache
+    if mode not in _sps_cache:
+        print(f"  [SPS benchmark] running 50-step warmup...")
+        measured = measure_sps(mode, cfg, steps=50)
+        print(f"  [SPS benchmark] measured = {measured:.1f} steps/s  (cached for remaining runs)")
 
     trainer.train()
     gymnasium_env.close()
@@ -394,15 +407,10 @@ def main() -> None:
 
     grid = [(mode, seed) for mode in args.modes for seed in args.seeds]
 
-    print(f"\nQ-IQL Ablation Study  —  {len(grid)} run(s)  [{args.env}]\n")
-    print(f"  {'#':>3}  {'mode':<24}  {'seed':>4}  {'~min':>7}")
-    print(f"  {'─'*47}")
-    for i, (mode, seed) in enumerate(grid, 1):
-        mins = NUM_STEPS / _SPS_ESTIMATE.get(mode, 200) / 60
-        print(f"  {i:>3}  {mode:<24}  {seed:>4}  {mins:>6.1f}m")
+    def _cfg_for_mode(mode: str):
+        return _build_config(mode, seed=0, env_cfg=env_cfg)
 
-    total_min = sum(NUM_STEPS / _SPS_ESTIMATE.get(m, 200) / 60 for m, _ in grid)
-    print(f"\n  Total ≈ {total_min:.0f} min ({total_min/60:.1f} h)")
+    print_grid_summary(grid, NUM_STEPS, _cfg_for_mode, args.env, env_cfg)
 
     if "quantum-fixed" in args.modes or "quantum-fixed-warmup" in args.modes:
         v_init = env_cfg["v_init"]

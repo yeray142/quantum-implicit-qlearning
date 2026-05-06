@@ -38,12 +38,14 @@ DEVICE   = "default.qubit"
 
 @pytest.fixture
 def net():
+    # use_pre_encoder=True by default (obs_dim=11 > n_qubits=8 → pre-encoder active)
     return QuantumValueNetwork(
         n_qubits=N_QUBITS,
         n_layers=N_LAYERS,
         obs_dim=OBS_DIM,
         device_name=DEVICE,
         running_stats=True,
+        use_pre_encoder=True,
     )
 
 
@@ -158,14 +160,16 @@ def test_parameter_count(net):
 
     expected_quantum = 2 * N_LAYERS * N_QUBITS * 3   # 144
     expected_head    = 2
-    expected_total   = expected_quantum + expected_head
+    # Pre-encoder (Linear 11 → 8) adds 88 weight + 8 bias = 96 params
+    expected_pre_encode = OBS_DIM * N_QUBITS + N_QUBITS  # 11*8 + 8 = 96
+    expected_classical_head = expected_head + expected_pre_encode
 
     assert pc["quantum"]        == expected_quantum, \
         f"Expected {expected_quantum} quantum params, got {pc['quantum']}"
-    assert pc["classical_head"] == expected_head, \
-        f"Expected {expected_head} head params, got {pc['classical_head']}"
-    assert pc["total"]          == expected_total, \
-        f"Expected {expected_total} total, got {pc['total']}"
+    assert pc["classical_head"] == expected_classical_head, \
+        f"Expected {expected_classical_head} head params (2 head + 96 pre-encoder), got {pc['classical_head']}"
+    assert pc["total"]          == expected_quantum + expected_classical_head, \
+        f"Expected {expected_quantum + expected_classical_head} total, got {pc['total']}"
 
 
 # ---------------------------------------------------------------------------

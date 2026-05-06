@@ -52,6 +52,10 @@ class QuantumNetConfig:
     device_name: str = "default.qubit"
     diff_method: str = "backprop"
     running_stats: bool = True
+    # When obs_dim > n_qubits, a trainable classical pre-encoder (obs_dim → n_qubits)
+    # maps the arctan-encoded state to the circuit input, replacing the legacy
+    # truncation. Set to False to reproduce prior results with truncation.
+    use_pre_encoder: bool = True
     layerwise_schedule: list[LayerwiseScheduleEntry] = field(
         default_factory=lambda: [
             LayerwiseScheduleEntry(start_step=0,      active_layers=1),
@@ -106,6 +110,15 @@ class QuantumIQLConfig(IQLConfig):
     # Diagnostics
     log_quantum_metrics: bool = True
     stats_update_interval: int = 1_000  # steps between running-stats refresh
+
+    # Fix C: freeze V optimizer step for cold-start mitigation.
+    # At step 0, V(s) ≈ b_init ≈ 374 (Fix A) but Q(s,a) ≈ 0 (random init),
+    # so L(V)_0 ≈ τ·374² ≈ 98,000. With unit-norm clipping the V optimizer
+    # takes ~10k clipped steps before Q bootstraps, causing systematic overshoot.
+    # Freezing V for the first v_freeze_steps lets Q bootstrap toward
+    # r + γ·374 before V begins moving.
+    fix_c_enabled: bool = False
+    v_freeze_steps: int = 1500
 
 
 def load_quantum_config(
