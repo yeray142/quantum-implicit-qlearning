@@ -13,25 +13,17 @@ np.random.seed(SEED)
 RESULTS_DIR = os.path.join(os.getcwd(), "qiql_ablation_results")
 os.makedirs(RESULTS_DIR, exist_ok=True)
  
-# ── GPU / device selection ────────────────────────────────────────────────────
-# Try lightning.gpu (requires pennylane-lightning[gpu] + CUDA).
-# Falls back to lightning.qubit (CPU-optimised C++) if GPU is unavailable.
-def _best_device(n_wires: int) -> qml.devices.Device:
-    try:
-        dev = qml.device("lightning.gpu", wires=n_wires)
-        # Probe it with a tiny circuit to confirm CUDA is really available
-        @qml.qnode(dev)
-        def _probe():
-            return qml.state()
-        _probe()
-        return dev
-    except Exception:
-        print("[device] lightning.gpu unavailable — falling back to lightning.qubit")
-        return qml.device("lightning.qubit", wires=n_wires)
- 
-# Move classical parameters to GPU when available
 TORCH_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"[torch] using device: {TORCH_DEVICE}")
+ 
+if torch.cuda.is_available():
+    DIFF_METHOD    = "backprop"
+    QUANTUM_BATCH  = 256        # GPU handles 256 samples in ~0.045 s/step
+    print("[quantum] GPU available — using diff_method='backprop' + default.qubit (full batch=256)")
+else:
+    DIFF_METHOD    = "adjoint"
+    QUANTUM_BATCH  = 4          # CPU fallback: keep step time ~0.20 s
+    print("[quantum] No GPU — using diff_method='adjoint', quantum_batch_size=4")
  
 # ── Plot style ────────────────────────────────────────────────────────────────
 plt.rcParams.update({
@@ -50,7 +42,8 @@ P = {
  
 # ── Experiment hyperparameters ────────────────────────────────────────────────
 N_STEPS  = 10**5    # training steps per run
-BATCH    = 16       # batch size
+# BATCH is set dynamically above: 256 on GPU (backprop), 4 on CPU (adjoint)
+BATCH    = QUANTUM_BATCH
 OBS_DIM  = 11       # observation dimension (CartPole-like, padded to n_qubits)
  
 # Grid for Exp 5 — joint (qubits × layers) sweep
@@ -92,9 +85,12 @@ OBSERVABLES = ["local_z0", "avg_local", "adaptive", "global"]
 # 3. QNode factory  (data re-uploading ansatz)
 # ─────────────────────────────────────────────────────────────────────────────
 def build_qnode(n_qubits: int, n_layers: int, entangler_fn, observable: str):
-    dev = _best_device(n_qubits)
+    # "default.qubit" is required for diff_method="backprop".
+    # backprop traces the circuit as PyTorch ops → GPU execution is automatic
+    # when theta/w/xs tensors are on CUDA.
+    dev = qml.device("default.qubit", wires=n_qubits)
  
-    @qml.qnode(dev, interface="torch", diff_method="adjoint")
+    @qml.qnode(dev, interface="torch", diff_method=DIFF_METHOD)
     def circuit(theta, w, xs):
         for l in range(n_layers):
             for q in range(n_qubits):
