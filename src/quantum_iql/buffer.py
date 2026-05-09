@@ -89,7 +89,11 @@ class ReplayBuffer:
             terminal condition (``terminations``), not a time-limit
             truncation (``truncations``).
         """
-        obs = np.asarray(episode.observations, dtype=np.float32)       # (T+1, obs_dim)
+        raw_obs = episode.observations
+        # Handle gymnasium robotics Dict observation spaces (PointMaze, AntMaze, etc.)
+        if isinstance(raw_obs, dict):
+            raw_obs = raw_obs["observation"]
+        obs = np.asarray(raw_obs, dtype=np.float32)             # (T+1, obs_dim)
         actions = np.asarray(episode.actions, dtype=np.float32)        # (T, act_dim)
         rewards = np.asarray(episode.rewards, dtype=np.float32)        # (T,)
         terminations = np.asarray(episode.terminations, dtype=np.float32)  # (T,)
@@ -182,7 +186,10 @@ def load_minari_dataset(dataset_id: str, device: str | torch.device = "cpu") -> 
 
     # Infer dimensions from the first episode
     first_ep = next(iter(dataset.iterate_episodes()))
-    obs_dim = int(np.asarray(first_ep.observations).shape[-1])
+    raw_obs = first_ep.observations
+    if isinstance(raw_obs, dict):
+        raw_obs = raw_obs["observation"]
+    obs_dim = int(np.asarray(raw_obs).shape[-1])
     act_dim = int(np.asarray(first_ep.actions).shape[-1])
     total_steps = int(dataset.total_steps)
 

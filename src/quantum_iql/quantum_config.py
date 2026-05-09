@@ -28,6 +28,27 @@ class LayerwiseScheduleEntry:
     active_layers: int = 1
 
 
+def make_layerwise_schedule(total_steps: int) -> list[LayerwiseScheduleEntry]:
+    """Build a proportional layerwise warm-up schedule.
+
+    Proportions (10% → L2, 30% → L3) follow Skolik et al. 2021 to avoid
+    barren plateaus at initialisation.
+
+    Args:
+        total_steps: Total training steps (used to scale the percentages).
+
+    Returns:
+        A list of ``LayerwiseScheduleEntry`` sorted by ``start_step``.
+    """
+    l2 = max(1, round(total_steps * 0.10))
+    l3 = max(l2 + 1, round(total_steps * 0.30))
+    return [
+        LayerwiseScheduleEntry(start_step=0,  active_layers=1),
+        LayerwiseScheduleEntry(start_step=l2, active_layers=2),
+        LayerwiseScheduleEntry(start_step=l3, active_layers=3),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Quantum-specific configuration
 # ---------------------------------------------------------------------------

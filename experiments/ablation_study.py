@@ -28,6 +28,9 @@ Usage
   python experiments/ablation_study.py --modes quantum-fixed constant-v classical \\
       --env walker2d --seeds 0 1 2
 
+  # PointMaze validation (Task 11): Fix-C, Classical, Constant-V, seeds 0-4:
+  python experiments/ablation_study.py --pointmaze
+
   # Dry-run:
   python experiments/ablation_study.py --dry-run
 """
@@ -50,7 +53,12 @@ import wandb
 
 from quantum_iql.buffer import load_minari_dataset
 from quantum_iql.networks import ActorNetwork, CriticNetwork, ValueNetwork
-from quantum_iql.quantum_config import LayerwiseScheduleEntry, QuantumIQLConfig, QuantumNetConfig
+from quantum_iql.quantum_config import (
+    LayerwiseScheduleEntry,
+    make_layerwise_schedule,
+    QuantumIQLConfig,
+    QuantumNetConfig,
+)
 from quantum_iql.trainer import IQLTrainer
 from quantum_iql.utils import make_env, set_seed
 
@@ -79,14 +87,14 @@ _ENV_REGISTRY: dict[str, dict] = {
         "a_init":  55.0,
         "group":  "hopper-medium",
     },
-    "walker2d": {
-        "dataset_id": "mujoco/walker2d/medium-v0",
-        "env_id":     "Walker2d-v4",
+    "pointmaze": {
+        "dataset_id": "D4RL/pointmaze/umaze-v2",
+        "env_id":     "PointMaze_UMaze-v3",
         "tau":   0.7,
         "beta":  3.0,
-        "v_init": 595.5,   # 5.955 / 0.01
-        "a_init":  55.0,
-        "group":  "walker2d-medium",
+        "v_init": 100.0,   # mean_episode_return / (1-gamma) = 1.0 / 0.01
+        "a_init":  0.02,   # std(episode_returns) ≈ 0.02; sparse terminal reward
+        "group":  "pointmaze-umaze",
     },
 }
 
@@ -233,13 +241,7 @@ def _base_config(seed: int, env_cfg: dict) -> QuantumIQLConfig:
 
 def _warmup_schedule(total_steps: int) -> list[LayerwiseScheduleEntry]:
     """10%→L2, 30%→L3 proportional schedule (original benchmark config)."""
-    l2 = max(1, round(total_steps * 0.10))
-    l3 = max(l2 + 1, round(total_steps * 0.30))
-    return [
-        LayerwiseScheduleEntry(start_step=0,  active_layers=1),
-        LayerwiseScheduleEntry(start_step=l2, active_layers=2),
-        LayerwiseScheduleEntry(start_step=l3, active_layers=3),
-    ]
+    return make_layerwise_schedule(total_steps)
 
 
 def _quantum_cfg(use_warmup: bool, total_steps: int) -> QuantumNetConfig:
@@ -398,11 +400,58 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seeds",         nargs="+", type=int, default=[0, 1, 2])
     p.add_argument("--wandb-offline", action="store_true")
     p.add_argument("--dry-run",       action="store_true")
+    p.add_argument("--pointmaze",     action="store_true",
+                   help="Run PointMaze validation: Fix-C, Classical, Constant-V (seeds 0-4).")
     return p.parse_args()
 
 
 def main() -> None:
     args    = parse_args()
+
+    if args.pointmaze:
+        env_cfg = _ENV_REGISTRY["pointmaze"]
+        pointmaze_modes = ["quantum-fixed-c", "classical", "constant-v"]
+        pointmaze_seeds = [0, 1, 2, 3, 4]
+        grid = [(mode, seed) for mode in pointmaze_modes for seed in pointmaze_seeds]
+
+        print("\n" + "=" * 70)
+        print("  PointMaze Validation — Task 11")
+        print("  Modes: Fix-C, Classical, Constant-V  |  Seeds: 0–4  |  Steps: 100k")
+        print("=" * 70)
+        print(f"  Fix-C:  V-gradient freeze first 1500 steps + no-warmup")
+        print(f"  Classical: MLP [256,256] value network")
+        print(f"  Constant-V: V(s) = 100 (frozen baseline)")
+        print(f"  Goal: Fix-C significantly outperforms Constant-V → task-independent evidence")
+        print()
+
+        def _cfg_for_mode(mode: str):
+            return _build_config(mode, seed=0, env_cfg=env_cfg)
+        print_grid_summary(grid, NUM_STEPS, _cfg_for_mode, "pointmaze", env_cfg)
+
+        failed: list[tuple] = []
+        for i, (mode, seed) in enumerate(grid, 1):
+            print(f"\n[{i}/{len(grid)}] {mode} / pointmaze / seed={seed}")
+            try:
+                run_ablation(mode, seed, env_name="pointmaze",
+                             wandb_offline=args.wandb_offline)
+            except Exception as exc:
+                import traceback
+                print(f"  ERROR: {exc}")
+                traceback.print_exc()
+                failed.append((mode, seed, str(exc)))
+                try:
+                    wandb.finish(exit_code=1)
+                except Exception:
+                    pass
+
+        print(f"\n{'='*65}")
+        print(f"  PointMaze Done: {len(grid)-len(failed)}/{len(grid)} succeeded")
+        if failed:
+            for mode, seed, msg in failed:
+                print(f"    FAILED: {mode}/seed={seed}: {msg}")
+        print(f"{'='*65}")
+        return
+
     env_cfg = _ENV_REGISTRY[args.env]
 
     grid = [(mode, seed) for mode in args.modes for seed in args.seeds]

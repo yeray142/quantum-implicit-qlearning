@@ -47,10 +47,11 @@ import time
 from typing import Any
 
 import torch
+import torch.nn as nn
 import torch.optim as optim
 
-# Quantum components (from issue #7 — lives in scripts/)
-from quantum_value_network import QuantumValueNetwork
+# Quantum components
+from .quantum_value_network import QuantumValueNetwork
 
 import wandb
 
@@ -64,7 +65,7 @@ from .trainer import IQLTrainer
 from .utils import hard_update
 
 # ---------------------------------------------------------------------------
-# Helper: gradient-norm utility
+# Helper: gradient-norm utility + shape adapter
 # ---------------------------------------------------------------------------
 
 def _grad_norm(param: torch.nn.Parameter) -> float:
@@ -72,6 +73,17 @@ def _grad_norm(param: torch.nn.Parameter) -> float:
     if param.grad is None:
         return 0.0
     return param.grad.detach().norm(2).item()
+
+
+class _Unsqueeze(nn.Module):
+    """Wrap a (B,) → (B,) network to produce (B,1) for value_loss / critic_loss."""
+
+    def __init__(self, net: nn.Module) -> None:
+        super().__init__()
+        self.net = net
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        return self.net(obs).unsqueeze(-1)
 
 
 # ---------------------------------------------------------------------------
@@ -270,18 +282,10 @@ class QuantumIQLTrainer(IQLTrainer):
         else:
             vbatch = batch
 
-        # Wrap quantum V to match shape (B,) → (B,1) contract for value_loss
+        # Wrap quantum V to match shape (B,) → (B,1) for value_loss
+        _vnet: nn.Module
         if self._is_quantum:
-            import torch.nn as _nn
-            class _Unsqueeze(_nn.Module):
-                def __init__(self, net):
-                    super().__init__()
-                    self.net = net
-
-                def forward(self, obs):
-                    return self.net(obs).unsqueeze(-1)
-
-            _vnet = _Unsqueeze(self.value_net)  # type: ignore[assignment]
+            _vnet = _Unsqueeze(self.value_net)
         else:
             _vnet = self.value_net  # type: ignore[assignment]
 
@@ -343,18 +347,9 @@ class QuantumIQLTrainer(IQLTrainer):
         """
         self.critic_optimizer.zero_grad()
 
+        _vtarget: nn.Module
         if self._is_quantum:
-            import torch.nn as _nn
-
-            class _Unsqueeze(_nn.Module):
-                def __init__(self, net):
-                    super().__init__()
-                    self.net = net
-
-                def forward(self, obs):
-                    return self.net(obs).unsqueeze(-1)
-
-            _vtarget = _Unsqueeze(self.value_target)  # type: ignore[assignment]
+            _vtarget = _Unsqueeze(self.value_target)
         else:
             _vtarget = self.value_target  # type: ignore[assignment]
 

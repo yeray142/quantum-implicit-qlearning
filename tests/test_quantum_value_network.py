@@ -16,7 +16,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from scripts.quantum_value_network import (
+from quantum_iql.quantum_value_network import (
     QuantumValueNetwork,
     _arctan_encode,
 )

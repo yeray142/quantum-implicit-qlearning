@@ -68,20 +68,22 @@ def measure_sps(
     from quantum_iql.utils import make_env, set_seed
 
     # Determine observation and action dimensions from the environment
-    if mode == "constant-v" or mode.startswith("classical"):
+    if env_cfg is not None:
+        # Use env_cfg dimensions when available (PointMaze, Walker2d, etc.)
+        _env = make_env(env_cfg["env_id"], seed=0)
+        obs_space = _env.observation_space
+        if hasattr(obs_space, 'keys') and 'observation' in obs_space.spaces:
+            obs_dim = int(obs_space["observation"].shape[0])
+        else:
+            obs_dim = int(obs_space.shape[0])
+        act_dim = int(_env.action_space.shape[0])
+        _env.close()
+    elif mode == "constant-v" or mode.startswith("classical"):
         obs_dim = 11   # mujoco hopper default
         act_dim = 3
     else:
-        # Quantum modes — look up from env_cfg
-        if env_cfg is not None:
-            from gymnasium import make as gym_make
-            _env = gym_make(env_cfg["env_id"])
-            obs_dim = int(_env.observation_space.shape[0])
-            act_dim = int(_env.action_space.shape[0])
-            _env.close()
-        else:
-            obs_dim = 11
-            act_dim = 3
+        obs_dim = 11
+        act_dim = 3
 
     # Build a sufficiently large synthetic buffer for the configured batch size
     warmup_batch_size = getattr(cfg, "batch_size", 256)

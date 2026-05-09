@@ -60,6 +60,7 @@ RUN_PREFIXES = {
     "quantum-no-warmup-hopper-medium":  ("hopper", "medium", "quantum-no-warmup"),
     "quantum-fixed-hopper-medium":      ("hopper", "medium", "quantum-fixed"),
     "quantum-fixed-warmup-hopper-medium": ("hopper", "medium", "quantum-fixed-warmup"),
+    "quantum-fixed-c-hopper-medium":    ("hopper", "medium", "quantum-fixed-c"),
 }
 
 CHECKPOINT_BASE = _PROJECT_ROOT / "experiments" / "checkpoints"
@@ -90,20 +91,25 @@ def fetch_runs(project: str, group: str):
 
 def run_stats(run) -> dict:
     """Extract key statistics from a single W&B run object."""
-    h = run.history(
-        samples=500,
-        keys=[
-            "eval/mean_return",
-            "loss/value",
-            "advantage_mean",
-            "advantage_std",
-            "quantum/grad_norm_theta",
-            "quantum/active_layers",
-        ],
-    )
+    h = run.history(samples=500)
     final_return = run.summary.get("eval/mean_return", float("nan"))
-    max_return   = h["eval/mean_return"].max() if "eval/mean_return" in h else float("nan")
 
+    def _col_max(df, col):
+        if col in df.columns and df[col].notna().any():
+            return float(df[col].max())
+        return float("nan")
+
+    def _col_last(df, col):
+        if col in df.columns and df[col].notna().any():
+            return float(df[col].dropna().iloc[-1])
+        return float("nan")
+
+    max_return   = _col_max(h, "eval/mean_return")
+    vloss_final  = _col_last(h, "loss/value")
+    adv_final    = _col_last(h, "advantage_mean")
+    adv_std_final = _col_last(h, "advantage_std")
+
+    # Gradient statistics
     grad_col = "quantum/grad_norm_theta"
     has_grad = grad_col in h.columns and h[grad_col].notna().any()
     if has_grad:
@@ -111,13 +117,22 @@ def run_stats(run) -> dict:
         exp_steps  = h.loc[h[grad_col] > GRAD_EXPLOSION_THRESHOLD, "_step"].tolist()
         first_exp  = int(min(exp_steps)) if exp_steps else None
         max_grad   = float(h[grad_col].max())
+
+        # Early gradient (steps 0-10000)
+        early_mask = h["_step"] <= 10000
+        early_grads = h.loc[early_mask, grad_col]
+        mean_early = float(early_grads.mean()) if early_grads.notna().any() else float("nan")
+
+        # Late gradient (steps 30000-100000)
+        late_mask = h["_step"] >= 30000
+        late_grads = h.loc[late_mask, grad_col]
+        mean_late = float(late_grads.mean()) if late_grads.notna().any() else float("nan")
     else:
         explosion  = False
-        first_exp  = None
-        max_grad   = float("nan")
-
-    vloss_final = float(h["loss/value"].iloc[-1]) if "loss/value" in h else float("nan")
-    adv_final   = float(h["advantage_mean"].iloc[-1]) if "advantage_mean" in h else float("nan")
+        first_exp   = None
+        max_grad    = float("nan")
+        mean_early  = float("nan")
+        mean_late   = float("nan")
 
     return {
         "name":         run.name,
@@ -125,9 +140,12 @@ def run_stats(run) -> dict:
         "max_return":   max_return,
         "vloss_final":  vloss_final,
         "adv_final":    adv_final,
+        "adv_std_final": adv_std_final,
         "explosion":    explosion,
         "first_exp":    first_exp,
         "max_grad":     max_grad,
+        "mean_early_grad": mean_early,
+        "mean_late_grad":  mean_late,
     }
 
 
@@ -147,9 +165,69 @@ def _load_buffer_once(env: str, dataset: str):
 _load_buffer_once._cache: dict = {}
 
 
+def _value_net_shape_from_ckpt(state_dict: dict) -> list | None:
+    """Infer ValueNetwork hidden_dims from a checkpoint state dict.
+
+    build_mlp creates even-indexed Linear layers (0, 2, 4, ...) in an
+    nn.Sequential.  We walk through them in order and collect each Linear's
+    output dim until we hit the value head (output dim == 1).
+
+    Example: net.0.weight [8, 11],  net.2.weight [8, 8],  net.4.weight [1, 8]
+             → hidden_dims = [8, 8]
+    """
+    import re
+
+    linear_keys = sorted(
+        [k for k in state_dict.keys() if k.endswith(".weight")],
+        key=lambda k: int(re.search(r"\d+", k).group()),
+    )
+    hidden = []
+    for key in linear_keys:
+        out_dim = state_dict[key].shape[0]
+        if out_dim == 1:
+            break
+        hidden.append(out_dim)
+    return hidden if hidden else None
+
+
+def _critic_net_shape_from_ckpt(
+    state_dict: dict, obs_dim: int = 11
+) -> tuple[list, int] | None:
+    """Infer (hidden_dims, action_dim) from a CriticNetwork checkpoint.
+
+    For CriticNetwork(obs_dim, act_dim, hidden_dims):
+      - q1.0: Linear(obs_dim + act_dim,  hidden_dims[0])  → weight [hd0, obs+act]
+      - q1.2: Linear(hidden_dims[0],      hidden_dims[1])  → weight [hd1, hd0]
+      - ...
+
+    The first layer's in_dim is (obs_dim + act_dim), so
+    act_dim = first_in_dim - obs_dim.
+    """
+    import re
+
+    linear_keys = sorted(
+        [k for k in state_dict.keys() if k.endswith(".weight")],
+        key=lambda k: int(re.search(r"\d+", k).group()),
+    )
+    hidden = []
+    action_dim = None
+    for key in linear_keys:
+        w = state_dict[key]
+        out_dim, in_dim = w.shape
+        if out_dim == 1:
+            break
+        if action_dim is None:
+            # First layer: in_dim = obs_dim + act_dim  →  act_dim = in_dim - obs_dim
+            action_dim = in_dim - obs_dim
+        hidden.append(out_dim)
+    if action_dim is None or action_dim <= 0:
+        return None
+    return hidden, action_dim
+
+
 def compute_p_neg_adv(mode_dir: str, seed: int, env: str, dataset: str) -> float | None:
     """
-    Compute P(A<0) = P(Q(s,a) - V(s) < 0) over 10k dataset samples.
+    Compute P(A<0) = P(Q(s,a) - V(s) < 0) over 50k dataset samples.
 
     Returns None if the checkpoint or required modules are unavailable.
     """
@@ -172,34 +250,193 @@ def compute_p_neg_adv(mode_dir: str, seed: int, env: str, dataset: str) -> float
         from quantum_iql.networks import CriticNetwork
 
         is_quantum = "quantum" in mode_dir
-        if is_quantum:
-            from quantum_value_network import QuantumValueNetwork
+        is_constant_v = "constant" in mode_dir
+
+        if is_constant_v:
+            vnet = None
+        elif is_quantum:
+            from quantum_iql import QuantumValueNetwork
             vnet = QuantumValueNetwork(n_qubits=8, n_layers=3, obs_dim=11)
         else:
             from quantum_iql.networks import ValueNetwork
-            vnet = ValueNetwork(11, hidden_dims=[256, 256])
+            hidden_dims = _value_net_shape_from_ckpt(ckpt["value_net"]) or [256, 256]
+            vnet = ValueNetwork(11, hidden_dims=hidden_dims)
 
-        vnet.load_state_dict(ckpt["value_net"])
-        cnet = CriticNetwork(11, 3, hidden_dims=[256, 256])
+        critic_info = _critic_net_shape_from_ckpt(ckpt["critic_net"], obs_dim=11)
+        if critic_info is not None:
+            c_hidden, action_dim = critic_info
+        else:
+            c_hidden, action_dim = [256, 256], 3
+        cnet = CriticNetwork(11, action_dim, hidden_dims=c_hidden)
+
+        if vnet is not None:
+            vnet.load_state_dict(ckpt["value_net"], strict=False)
         cnet.load_state_dict(ckpt["critic_net"])
 
         buf = _load_buffer_once(env, dataset)
         rng = np.random.default_rng(42)
-        idx  = rng.choice(buf._size, size=10_000, replace=False)
+        idx  = rng.choice(buf._size, size=50_000, replace=False)
         obs  = torch.FloatTensor(buf._observations[idx])
         acts = torch.FloatTensor(buf._actions[idx])
 
-        vnet.eval(); cnet.eval()
+        if vnet is not None:
+            vnet.eval()
+        cnet.eval()
         with torch.no_grad():
-            v        = vnet(obs).squeeze()
+            if is_constant_v:
+                v_value = float(ckpt["v_constant"])
+            else:
+                v = vnet(obs).squeeze()
             q1, q2   = cnet(obs, acts)
-            adv      = torch.min(q1, q2).squeeze() - v
+            if is_constant_v:
+                adv = torch.min(q1, q2).squeeze() - v_value
+            else:
+                adv = torch.min(q1, q2).squeeze() - v
             p_neg    = (adv < 0).float().mean().item()
 
         return p_neg
 
     except Exception as exc:  # pragma: no cover
         print(f"  [warn] P(A<0) failed for {mode_dir}/seed_{seed}: {exc}", file=sys.stderr)
+        return None
+
+
+def compute_ckpt_metrics(mode_dir: str, seed: int, env: str, dataset: str) -> dict | None:
+    """
+    Compute all checkpoint-based metrics:
+    - b_final, a_final (affine head parameters for quantum models)
+    - E[A] (expected advantage)
+    - E[e^{beta*A}] (for constant-V comparison, beta=5)
+    - L(V)_final (value loss)
+
+    Returns None if checkpoint unavailable.
+    """
+    ckpt_dir  = CHECKPOINT_BASE / env / dataset / mode_dir / f"seed_{seed}"
+    ckpt_path = ckpt_dir / "checkpoint_final.pt"
+
+    if not ckpt_path.exists():
+        return None
+
+    try:
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        if ckpt.get("step", 0) < 50_000:
+            alt = ckpt_dir / "checkpoint_00100000.pt"
+            if alt.exists():
+                ckpt = torch.load(alt, map_location="cpu")
+            else:
+                return None
+
+        is_quantum = "quantum" in mode_dir
+        is_constant_v = "constant" in mode_dir
+
+        # Extract affine head parameters
+        b_final = None
+        a_final = None
+        if is_quantum and "value_net" in ckpt:
+            sd = ckpt["value_net"]
+            # Quantum models store a and b directly
+            b_final = float(sd["b"].item()) if "b" in sd else None
+            a_final = float(sd["a"].item()) if "a" in sd else None
+        elif not is_constant_v and not is_quantum and "value_net" in ckpt:
+            sd = ckpt["value_net"]
+            # Classical models have net.4 as output layer with shape [1, hidden]
+            import re
+            linear_keys = sorted(
+                [k for k in sd.keys() if k.endswith(".weight")],
+                key=lambda k: int(re.search(r"\d+", k).group()),
+            )
+            for key in linear_keys:
+                if sd[key].shape[0] == 1:
+                    b_key = key.replace(".weight", ".bias")
+                    if b_key in sd:
+                        b_final = float(sd[b_key].item())
+                    # a_final for classical is the output weight - not a scalar
+                    # For classical, V(s) = net(s) directly, no affine scaling
+                    a_final = None
+                    break
+
+        vnet = None
+        cnet = None
+
+        # Load networks for advantage computation
+        if is_constant_v:
+            # For constant-V, use the stored V value
+            v_constant = ckpt["v_constant"]
+            v_final = float(v_constant.item()) if hasattr(v_constant, 'item') else float(v_constant)
+            # Load critic to compute advantages with constant V
+            from quantum_iql.networks import CriticNetwork
+            critic_info = _critic_net_shape_from_ckpt(ckpt["critic_net"], obs_dim=11)
+            if critic_info is not None:
+                c_hidden, action_dim = critic_info
+            else:
+                c_hidden, action_dim = [256, 256], 3
+            cnet = CriticNetwork(11, action_dim, hidden_dims=c_hidden)
+            cnet.load_state_dict(ckpt["critic_net"])
+        else:
+            from quantum_iql.networks import CriticNetwork
+            if is_quantum:
+                from quantum_iql import QuantumValueNetwork
+                vnet = QuantumValueNetwork(n_qubits=8, n_layers=3, obs_dim=11)
+            else:
+                from quantum_iql.networks import ValueNetwork
+                hidden_dims = _value_net_shape_from_ckpt(ckpt["value_net"]) or [256, 256]
+                vnet = ValueNetwork(11, hidden_dims=hidden_dims)
+
+            critic_info = _critic_net_shape_from_ckpt(ckpt["critic_net"], obs_dim=11)
+            if critic_info is not None:
+                c_hidden, action_dim = critic_info
+            else:
+                c_hidden, action_dim = [256, 256], 3
+            cnet = CriticNetwork(11, action_dim, hidden_dims=c_hidden)
+
+            vnet.load_state_dict(ckpt["value_net"], strict=False)
+            cnet.load_state_dict(ckpt["critic_net"])
+
+        # Compute advantage statistics on dataset
+        buf = _load_buffer_once(env, dataset)
+        rng = np.random.default_rng(42)
+        idx = rng.choice(buf._size, size=50_000, replace=False)
+        obs = torch.FloatTensor(buf._observations[idx])
+        acts = torch.FloatTensor(buf._actions[idx])
+
+        if cnet is not None:
+            cnet.eval()
+        if vnet is not None:
+            vnet.eval()
+
+        with torch.no_grad():
+            if is_constant_v:
+                # Constant V: V(s) = v_final for all states
+                q1, q2 = cnet(obs, acts)
+                adv = torch.min(q1, q2).squeeze() - v_final
+            else:
+                v = vnet(obs).squeeze()
+                q1, q2 = cnet(obs, acts)
+                adv = torch.min(q1, q2).squeeze() - v
+
+            E_A = float(adv.mean().item())
+            # Clamp advantages to avoid overflow in exp(beta*A)
+            clamped_adv = torch.clamp(adv, min=-10, max=10)
+            E_exp_beta_A = float(torch.exp(clamped_adv * 5).mean().item())  # beta = 5
+
+        # Value loss (final) - only use checkpoint value if W&B value is missing
+        vloss_final = float("nan")
+        ckpt_vloss = ckpt.get("value_loss", float("nan"))
+        if ckpt_vloss is not None and not np.isnan(ckpt_vloss):
+            vloss_final = ckpt_vloss
+        # else leave vloss_final as NaN - will use W&B value from run_stats
+
+        return {
+            "b_final": b_final,
+            "a_final": a_final,
+            "E_A": E_A,
+            "E_exp_beta_A": E_exp_beta_A,
+            # Only add vloss_final if it's valid; run_stats already has the W&B value
+            **({"vloss_final": vloss_final} if not np.isnan(vloss_final) else {}),
+        }
+
+    except Exception as exc:
+        print(f"  [warn] checkpoint metrics failed for {mode_dir}/seed_{seed}: {exc}", file=sys.stderr)
         return None
 
 
@@ -238,6 +475,9 @@ def parse_args():
                    help="Skip checkpoint loading (no P(A<0) computation).")
     p.add_argument("--json",           action="store_true",
                    help="Output raw JSON instead of formatted table.")
+    p.add_argument("--models", nargs="+",
+                   help="Only analyze specific models by their W&B run name prefix. "
+                        "Examples: --models quantum-fixed-hopper-medium classical-hopper-medium")
     return p.parse_args()
 
 
@@ -261,6 +501,11 @@ def main():
 
     results: dict[str, list] = {}
     for prefix, entries in sorted(groups.items()):
+        # Filter by --models if specified
+        if args.models and prefix not in args.models:
+            print(f"  Skipping {prefix} (not in --models)", file=sys.stderr)
+            continue
+
         entries.sort(key=lambda x: x[0])
         print(f"\nAnalyzing {prefix} ({len(entries)} seeds) …", file=sys.stderr)
         seed_stats = []
@@ -272,6 +517,10 @@ def main():
             if not args.no_checkpoints:
                 print(f"  seed {seed}: computing P(A<0) from checkpoint …", file=sys.stderr)
                 s["p_neg"] = compute_p_neg_adv(mode_dir, seed, env, dataset)
+                print(f"  seed {seed}: computing checkpoint metrics …", file=sys.stderr)
+                ckpt_metrics = compute_ckpt_metrics(mode_dir, seed, env, dataset)
+                if ckpt_metrics:
+                    s.update(ckpt_metrics)
             else:
                 s["p_neg"] = None
 
