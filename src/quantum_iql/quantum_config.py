@@ -77,6 +77,9 @@ class QuantumNetConfig:
     # maps the arctan-encoded state to the circuit input, replacing the legacy
     # truncation. Set to False to reproduce prior results with truncation.
     use_pre_encoder: bool = True
+    # Multi-qubit readout: when True, V(s) = Σᵢ aᵢ⟨Zᵢ⟩ + b (8 readout coefficients).
+    # When False, V(s) = a⟨Z₀⟩ + b (single-qubit readout, original design).
+    multi_qubit_readout: bool = False
     layerwise_schedule: list[LayerwiseScheduleEntry] = field(
         default_factory=lambda: [
             LayerwiseScheduleEntry(start_step=0,      active_layers=1),

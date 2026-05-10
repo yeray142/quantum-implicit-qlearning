@@ -173,6 +173,7 @@ class QuantumIQLTrainer(IQLTrainer):
                 diff_method=qv.diff_method,
                 running_stats=qv.running_stats,
                 use_pre_encoder=qv.use_pre_encoder,
+                multi_qubit_readout=qv.multi_qubit_readout,
             ).to(self.device)
             self._is_quantum = True
             pre_mode = "pre_encode" if qv.use_pre_encoder else "truncate"
@@ -214,6 +215,7 @@ class QuantumIQLTrainer(IQLTrainer):
                 device_name=qv.device_name,
                 diff_method=qv.diff_method,
                 running_stats=qv.running_stats,
+                multi_qubit_readout=qv.multi_qubit_readout,
             ).to(self.device)
             hard_update(self.value_target, self.value_net)
         else:

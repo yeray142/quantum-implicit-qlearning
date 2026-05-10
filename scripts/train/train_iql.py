@@ -19,7 +19,7 @@ from __future__ import annotations
 import argparse
 
 import wandb
-from quantum_iql.buffer import load_minari_dataset
+from quantum_iql.buffer import load_custom_dataset, load_minari_dataset
 from quantum_iql.config import load_config
 from quantum_iql.trainer import IQLTrainer
 from quantum_iql.utils import get_device, make_env, set_seed
@@ -43,6 +43,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=[],
         metavar="KEY=VALUE",
         help="Zero or more dot-notation overrides, e.g. tau=0.9 seed=1.",
+    )
+    parser.add_argument(
+        "--dataset-path",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a custom dataset directory (from scripts/generate_pointmaze_dataset.py).\n"
+            "If provided, uses load_custom_dataset instead of load_minari_dataset.\n"
+            "Example: --dataset-path ./datasets/pointmaze_expert"
+        ),
     )
     return parser.parse_args(argv)
 
@@ -69,7 +79,11 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     # -------------------------------------------------------------- data + env
-    buffer = load_minari_dataset(cfg.dataset_id, device=str(device))
+    if args.dataset_path:
+        print(f"Loading custom dataset from: {args.dataset_path}")
+        buffer = load_custom_dataset(args.dataset_path, device=str(device))
+    else:
+        buffer = load_minari_dataset(cfg.dataset_id, device=str(device))
     env = make_env(cfg.env_id, seed=cfg.seed)
     set_seed(cfg.seed, env=env)
 

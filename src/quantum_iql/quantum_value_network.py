@@ -53,6 +53,7 @@ def _build_qnode(
     n_layers: int,
     device_name: str = "default.qubit",
     diff_method: str = "backprop",
+    return_all_qubits: bool = False,
 ):
     """Construct a batched PennyLane QNode using parameter broadcasting.
 
@@ -73,6 +74,11 @@ def _build_qnode(
         sweep; recommended for lightning.qubit.
       "parameter-shift"   — 2 evals per parameter; use only if adjoint is
         unavailable for the chosen device.
+
+    Args:
+        return_all_qubits: When True, return all n_qubits expectation values
+            ⟨Z_0⟩...⟨Z_{n_qubits-1}⟩ as shape (B, n_qubits). When False, return
+            only ⟨Z_0⟩ as shape (B,).
     """
     dev = qml.device(device_name, wires=n_qubits)
 
@@ -82,7 +88,7 @@ def _build_qnode(
         w: torch.Tensor,       # (n_layers, n_qubits, 3)
         xs: torch.Tensor,      # (B, n_qubits)  ← full batch
         active_layers: int,
-    ) -> torch.Tensor:         # returns (B,) via parameter broadcasting
+    ) -> torch.Tensor:
         _cz_preamble(n_qubits)
 
         for layer_idx in range(active_layers):
@@ -96,6 +102,8 @@ def _build_qnode(
                 qml.Rot(angles[:, 0], angles[:, 1], angles[:, 2], wires=q)
             _cz_entangler(n_qubits)
 
+        if return_all_qubits:
+            return [qml.expval(qml.PauliZ(q)) for q in range(n_qubits)]  # list of (B,)
         return qml.expval(qml.PauliZ(0))   # (B,) when xs is batched
 
     return circuit
@@ -120,6 +128,7 @@ class QuantumValueNetwork(nn.Module):
         diff_method: str = "backprop",
         running_stats: bool = True,
         use_pre_encoder: bool = True,
+        multi_qubit_readout: bool = False,
     ) -> None:
         super().__init__()
 
@@ -134,7 +143,14 @@ class QuantumValueNetwork(nn.Module):
         self._active_layers: int = n_layers
 
         self.theta, self.w = _identity_block_init(n_layers, n_qubits)
-        self.a = nn.Parameter(torch.ones(1))
+
+        self._multi_qubit_readout = multi_qubit_readout
+        if multi_qubit_readout:
+            # V(s) = Σᵢ aᵢ⟨Zᵢ⟩ + b — n_qubits readout coefficients
+            self.a = nn.Parameter(torch.ones(n_qubits))
+        else:
+            # V(s) = a⟨Z₀⟩ + b — single-qubit readout (original design)
+            self.a = nn.Parameter(torch.ones(1))
         self.b = nn.Parameter(torch.zeros(1))
 
         self.use_pre_encoder = use_pre_encoder
@@ -152,7 +168,10 @@ class QuantumValueNetwork(nn.Module):
             self.sigma = None
 
         self._diff_method = diff_method
-        self._circuit = _build_qnode(n_qubits, n_layers, device_name, diff_method)
+        self._circuit = _build_qnode(
+            n_qubits, n_layers, device_name, diff_method,
+            return_all_qubits=multi_qubit_readout,
+        )
 
     def set_active_layers(self, n: int) -> None:
         """Set number of active DRU layers for layerwise warm-up (Skolik et al., 2021).
@@ -220,9 +239,11 @@ class QuantumValueNetwork(nn.Module):
                 self.theta.cpu(), self.w.cpu(), xs.cpu(), self._active_layers
             ).to(_device)
 
-        expvals = expvals.float()
-
-        return self.a * expvals + self.b  # shape (B,)
+        if self._multi_qubit_readout:
+            # expvals is a list of (B,) tensors — stack to (B, n_qubits)
+            expvals = torch.stack(expvals, dim=-1).float()  # (B, n_qubits)
+            return torch.sum(self.a * expvals, dim=-1) + self.b  # (B,)
+        return self.a * expvals.float() + self.b  # shape (B,)
 
     def parameter_count(self) -> dict:
         quantum = self.theta.numel() + self.w.numel()
@@ -233,9 +254,11 @@ class QuantumValueNetwork(nn.Module):
 
     def __repr__(self) -> str:
         pc = self.parameter_count()
+        readout_type = "multi-qubit" if self._multi_qubit_readout else "single-qubit"
         return (
             f"QuantumValueNetwork(n_qubits={self.n_qubits}, n_layers={self.n_layers}, "
             f"obs_dim={self.obs_dim}, use_pre_encoder={self.use_pre_encoder}, "
+            f"readout={readout_type}, "
             f"active_layers={self._active_layers}, "
             f"params={pc['total']} [{pc['quantum']} quantum + {pc['classical_head']} head])"
         )

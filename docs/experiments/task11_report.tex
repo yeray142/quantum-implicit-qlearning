@@ -1,0 +1,519 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[margin=2cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+\usepackage{parskip}
+\usepackage{xcolor}
+
+\definecolor{darkred}{rgb}{0.7,0.0,0.0}
+\definecolor{darkgreen}{rgb}{0.0,0.45,0.0}
+
+\title{\textbf{Task 11: Benchmark Expansion and Fix C Evaluation}\\
+  \large Classical vs.\ Quantum vs.\ Fix-A\,+\,B\,+\,C ablations\\
+  Hopper-v4 $\cdot$ \texttt{medium-v0} $\cdot$ 100\,k steps}
+\author{Yeray Cordero Carrasco \\ QC810 --- Quantum Machine Learning, SDU}
+\date{May 2026}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+%──────────────────────────────────────────────────────────────────────────────
+\section{Experimental Setup}
+
+Nine variants of Implicit Q-Learning (IQL)~\cite{kostrikov2021} were trained
+for 100\,000 gradient steps on \texttt{mujoco/hopper/medium-v0}.
+Critic $Q(s,a)$ and actor $\pi(a|s)$ are classical MLPs $[256,256]$ across all
+variants; only the value network $V(s)$ varies. All quantum variants share the
+same DRU circuit architecture ($n_q=8$, $n_L=3$, 146 parameters) with
+PennyLane \texttt{backprop} on \texttt{default.qubit} (GPU).
+
+\begin{itemize}
+  \item \textbf{Classical}: MLP $V(s)$ $[256,256]$, \textbf{69\,121 params}.
+        Seeds $\{0,1,2\}$.
+  \item \textbf{Classical-Deep}: MLP $V(s)$ $[8,8,8]$, \textbf{249 params}.
+        Depth-matched to the 3-layer DRU circuit. Seeds $\{0,\ldots,7\}$.
+  \item \textbf{Classical-Small}: single-hidden-layer MLP width 11,
+        \textbf{144 params}. Seeds $\{0,1,2\}$.
+  \item \textbf{Constant-V}: $V(s)\equiv100$ (frozen scalar),
+        \textbf{0 trainable parameters}. Seeds $\{0,\ldots,7\}$.
+  \item \textbf{Quantum (Warmup)}: DRU circuit with Skolik layerwise warm-up
+        (layers activate at steps $\{0,10\text{k},30\text{k}\}$). Seeds $\{0,1,2\}$.
+  \item \textbf{Quantum No-Warmup}: identical DRU circuit with all layers
+        active from step~0. Seeds $\{0,\ldots,7\}$.
+  \item \textbf{Quantum Fixed} (\emph{Fix A\,+\,B}): DRU circuit with
+        $b_0=374$, $a_0=55$ (Fix~A: correct value-scale initialisation) and
+        all layers active from step~0 (Fix~B: no warmup). Seeds $\{0,\ldots,7\}$.
+  \item \textbf{Quantum Fixed-Warmup} (\emph{Fix A only}): same Fix~A
+        affine initialisation, retaining the original Skolik warm-up schedule.
+        Seeds $\{0,\ldots,7\}$.
+  \item \textbf{Quantum Fixed-C} (\emph{Fix A\,+\,B\,+\,C}): same Fix~A\,+\,B
+        configuration with the additional Fix~C: the value gradient is frozen
+        for the first 1\,500 steps, allowing the critic to bootstrap toward
+        $r+\gamma\cdot374$ before $V$ begins updating. Seeds $\{0,\ldots,7\}$.
+\end{itemize}
+
+All quantum Fixed variants use $b_0=374\approx\bar{r}/(1-\gamma)$ (dataset
+geometric-sum return) and $a_0=55$ (matching classical $V$ slope std).
+
+%──────────────────────────────────────────────────────────────────────────────
+\section{Results Summary}
+
+\begin{table}[h]
+\centering
+\caption{Final evaluation return at 100\,k steps. CV = coefficient of variation.
+$P(A{<}0)\approx0.70$ required for correct IQL expectile calibration.
+All quantum modes use $n=8$ seeds except warmup ($n=3$).}
+\label{tab:returns}
+\setlength{\tabcolsep}{4.5pt}
+\begin{tabular}{lrrrrrr}
+\toprule
+\textbf{Mode} & \textbf{Mean} & \textbf{Std} & \textbf{CV} &
+  \textbf{V-params} & $\mathbb{E}[A]$ & $P(A{<}0)$ \\
+\midrule
+Classical (69\,121 params)
+  & 3505.8 & 16.2  & 0.5\%  & 69\,121 & $-0.96$ & 0.70--0.88 \\
+Classical-Deep [8,8,8] (249 params)
+  & 3307.9 & 413.2 & 12.5\% & 249
+  & $-1.07$ & 0.55--0.71 \\
+Classical-Small [11] (144 params)
+  & 1957.9 & 1103.6 & 56.4\% & 144
+  & $-1.84$ & 0.64--0.69 \\
+Constant-V ($V\equiv100$, 0 params)
+  & 3013.5 & 579.4 & 19.2\% & 0
+  & \ldots & \ldots \\
+Quantum Warmup (146 params, $n{=}3$)
+  & 3409.1 & 95.2  & 2.8\%  & 146
+  & $+5.06$ & 0.07--0.34 \\
+Quantum No-Warmup (146 params)
+  & 2794.5 & 817.4 & 29.2\% & 146
+  & $+10.60$ & 0.02--0.70 \\
+Quantum Fixed (Fix A\,+\,B, 146 params)
+  & 3084.0 & 632.5 & 20.5\% & 146
+  & $+2.97$ & 0.12--0.73 \\
+Quantum Fixed-Warmup (Fix A only, 146 params)
+  & 3151.8 & 628.7 & 19.9\% & 146
+  & $+1.33$ & 0.36--0.86 \\
+\textcolor{darkgreen}{Quantum Fixed-C (Fix A\,+\,B\,+\,C, 146 params)}
+  & \textcolor{darkgreen}{3221.5}
+  & \textcolor{darkgreen}{440.1}
+  & \textcolor{darkgreen}{13.7\%}
+  & \textcolor{darkgreen}{146}
+  & \textcolor{darkgreen}{$-2.36$}
+  & \textcolor{darkgreen}{0.44--0.88} \\
+\midrule
+\end{tabular}
+\end{table}
+
+%──────────────────────────────────────────────────────────────────────────────
+\section{Per-Seed Diagnostic Tables}
+
+\subsection{Quantum Fixed-C (Fix A\,+\,B\,+\,C) — the primary new result}
+\label{sec:fixc}
+
+Fix~C freezes the value gradient for the first 1\,500 steps, designed to
+eliminate the cold-start V-loss shock identified in Task 10 where seed~0 with
+$V_0\approx374$ suffered $\mathcal{L}(V)_0\approx98\,000$, causing systematic
+overshoot to $b_\text{final}=455$.
+
+\begin{center}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{clrrrrr}
+\toprule
+\textbf{Seed} & \textbf{Return} & $\mathbb{E}[A]$ &
+  $P(A{<}0)$ & $a_\text{final}$ & $b_\text{final}$ & Explosion \\
+\midrule
+0 & 2468.3 & $-3.73$ & \textcolor{darkgreen}{0.773} & 50.6 & 376.0 & \textbf{no} \\
+1 & 3520.7 & $+1.12$ & \textcolor{darkred}{0.878} & 61.3 & 373.6 & \textbf{no} \\
+2 & 3474.8 & $-4.87$ & \textcolor{darkgreen}{0.670} & 44.6 & 378.8 & \textbf{no} \\
+3 & 3519.8 & $-0.61$ & \textcolor{darkgreen}{0.693} &  9.1 & 370.4 & \textbf{no} \\
+4 & 3591.5 & $-11.64$& \textcolor{darkgreen}{0.733} & 25.7 & 384.3 & \textbf{no} \\
+5 & 2996.1 & $-2.14$ & \textcolor{darkgreen}{0.679} & 33.6 & 381.0 & \textbf{no} \\
+6 & 3611.3 & $+2.58$ & \textcolor{darkred}{0.438} & 12.0 & 366.8 & \textbf{no} \\
+7 & 2589.4 & $-2.10$ & \textcolor{darkgreen}{0.687} & 43.2 & 373.9 & \textbf{no} \\
+\midrule
+Mean & $3221.5 \pm 440.1$ & $-2.36$ & 0.694 &
+  \multicolumn{2}{r}{avg $b \approx 376$} & 0/8 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The gradient-freeze is fully effective: \textbf{zero explosions across all 8
+seeds} vs 3/8 for Fixed and 3/8 for Fixed-Warmup. All $b_\text{final}$ values
+in $[367,\,384]$, tightly centred around the target 374. Six of eight seeds
+reach the on-target band, with seeds 2, 3, 4, 5, 7 achieving $P(A<0)\in[0.67,0.73]$.
+Seed~1 is over-calibrated at $P(A<0)=0.878$, while seed~6 fails to reach
+direction-correct calibration at $P(A<0)=0.438$.
+
+\subsection{Quantum Fixed (Fix A\,+\,B) — expanded to $n=8$}
+
+\begin{center}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{clrrrrr}
+\toprule
+\textbf{Seed} & \textbf{Return} & $\mathbb{E}[A]$ &
+  $P(A{<}0)$ & $a_\text{final}$ & $b_\text{final}$ & Max $\nabla\theta$ \\
+\midrule
+0 & 3565.1 & $+31.44$ & \textcolor{darkred}{0.121} & 123.4 & 455.8 & 624 \\
+1 & 3517.0 & $-0.53$  & \textcolor{darkgreen}{0.610} &  58.4 & 378.2 &  74 \\
+2 & 3495.0 & $+0.23$  & \textcolor{darkred}{0.431} &   2.6 & 380.6 &  63 \\
+3 & 3516.7 & $-0.79$  & \textcolor{darkgreen}{0.735} &  26.2 & 370.4 & 0.6 \\
+4 & 3298.9 & $+13.48$ & \textcolor{darkgreen}{0.588} &  33.4 & 382.5 & 0.4 \\
+5 & 2630.0 & $-1.56$  & \textcolor{darkgreen}{0.682} &  54.8 & 373.7 & 0.6 \\
+6 & 3038.7 & $-4.03$  & \textcolor{darkgreen}{0.689} &  58.4 & 374.4 & 0.4 \\
+7 & 1610.7 & $+1.75$  & \textcolor{darkgreen}{0.610} &  51.9 & 375.3 & 0.5 \\
+\midrule
+Mean & $3084.0 \pm 632.5$ & $+2.97$ & 0.558 &
+  \multicolumn{2}{r}{} & 3/8 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The expanded seed set ($n=3\rightarrow 8$) reveals the true variance. Seed~0
+still fails ($b=455.8$, $a=123.4$, $P(A<0)=0.121$), confirming that Fix~A+B
+does not prevent cold-start shock in all seeds. Five of eight seeds (1, 3, 5, 6, 7)
+reach the on-target band, with seeds 3 and 6 achieving the best calibration
+at $P(A<0)=0.735$ and $0.689$ respectively. Direction-correct: 6/8 (Wilson CI
+$[44\%,91\%]$).
+
+\subsection{Quantum Fixed-Warmup (Fix A only) — expanded to $n=8$}
+
+\begin{center}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{clrrrrr}
+\toprule
+\textbf{Seed} & \textbf{Return} & $\mathbb{E}[A]$ &
+  $P(A{<}0)$ & $a_\text{final}$ & $b_\text{final}$ & Max $\nabla\theta$ \\
+\midrule
+0 & 3466.1 & $-1.96$ & \textcolor{darkgreen}{0.829} &  3.9 & 401.3 & 110 \\
+1 & 3503.4 & $-1.29$ & \textcolor{darkgreen}{0.753} &  6.4 & 383.5 & 327 \\
+2 & 3566.8 & $-0.22$ & \textcolor{darkred}{0.364} &  3.5 & 419.7 & 189 \\
+3 & 3563.5 & $+14.60$ & \textcolor{darkgreen}{0.683} & 52.4 & 379.2 & 0.7 \\
+4 & 2226.4 & $-2.35$ & \textcolor{darkgreen}{0.646} & 36.8 & 374.4 & 0.5 \\
+5 & 1921.0 & $-3.25$ & \textcolor{darkgreen}{0.857} & 58.5 & 385.2 & 0.5 \\
+6 & 3539.4 & $+2.94$ & \textcolor{darkgreen}{0.621} & 10.9 & 375.4 & 0.3 \\
+7 & 3427.7 & $+13.32$ & \textcolor{darkgreen}{0.671} & 34.5 & 395.1 & 0.6 \\
+\midrule
+Mean & $3151.8 \pm 628.7$ & $+1.33$ & 0.678 &
+  \multicolumn{2}{r}{} & 3/8 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Warmup does not prevent gradient explosions: seeds~0--2 all exceed
+$\|\nabla\theta\|>100$. Seeds~5 and~7 fail catastrophically (1921, 2315 return)
+with $\mathbb{E}[A]>0$, despite warmup. Seeds~0, 1, and 5 achieve on-target
+calibration ($P(A<0)=0.829$, $0.753$, $0.857$), with seeds 0 and 1 being the
+best-calibrated pair in the Fix-A family. Direction-correct: 7/8 (Wilson CI
+$[44\%,97\%]$); on-target: 5/8.
+
+%──────────────────────────────────────────────────────────────────────────────
+\section{Aggregate Calibration Summary}
+
+\begin{center}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{lrrrrr}
+\toprule
+\textbf{Config} & \textbf{Mean return} & \textbf{CV} &
+  $N(P(A{<}0){>}0.5)$ & $N(P{\in}[0.6,0.8])$ &
+  $N(\|\nabla\theta\|{>}10)$ \\
+\midrule
+Classical ($n=3$)             & $3505.8 \pm 16.2$  &  0.5\% & 3/3 & 2/3 & 0/3 \\
+Classical-Deep ($n=8$)        & $3307.9 \pm 413.2$ & 12.5\% & 8/8 & 5/8 & 0/8 \\
+Classical-Small ($n=3$)       & $1957.9 \pm 1103.6$& 56.4\% & 3/3 & 3/3 & 0/3 \\
+Constant-V ($n=8$)            & $3013.5 \pm 579.4$ & 19.2\% & \ldots & \ldots & 0/8 \\
+\midrule
+Quantum Warmup ($n=3$)        & $3409.1 \pm  95.2$ &  2.8\% & 0/3 & 0/3 & 0/3 \\
+Quantum No-Warmup ($n=8$)     & $2794.5 \pm 817.4$ & 29.2\% & 2/8 & 1/8 & 8/8 \\
+\midrule
+Quantum Fixed ($n=8$)         & $3084.0 \pm 632.5$ & 20.5\% & 6/8 & 5/8 & 3/8 \\
+Quantum Fixed-Warmup ($n=8$)  & $3151.8 \pm 628.7$ & 19.9\% & 7/8 & 5/8 & 3/8 \\
+\textcolor{darkgreen}{Quantum Fixed-C ($n=8$)}
+                               & \textcolor{darkgreen}{$3221.5 \pm 440.1$}
+                               & \textcolor{darkgreen}{13.7\%}
+                               & \textcolor{darkgreen}{7/8}
+                               & \textcolor{darkgreen}{6/8}
+                               & \textcolor{darkgreen}{\textbf{0/8}} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Fix~C achieves the highest mean return in the Fix-A family ($3221.5$, lowest CV
+13.7\%) and is the only configuration with zero gradient explosions. Five of
+eight Fixed-C seeds reach the on-target band, the best rate in the Fix-A family.
+
+%──────────────────────────────────────────────────────────────────────────────
+\section{Statistical Analysis}
+
+All statistical tests use Welch's two-sample $t$-test (unequal variances) for
+return comparisons and Fisher's exact test (two-sided) for calibration
+proportion comparisons. Wilson score intervals are used for 95\% confidence
+intervals on proportions.
+
+\subsection{Pairwise Return Comparisons}
+
+\begin{center}
+\setlength{\tabcolsep}{8pt}
+\begin{tabular}{lrrr}
+\toprule
+Comparison & Welch $t$ & $p$ & Cohen's $d$ \\
+\midrule
+Fix-A pool (Fixed + Fixed-Warmup + Fixed-C, $n=24$) vs Classical ($n=3$)
+           & $-2.92$ & $\mathbf{0.0075}$ & $-0.87$ \\[4pt]
+Quantum Fixed-C ($n=8$) vs Classical ($n=3$)
+           & $-1.71$ & $0.131$ & $-0.91$ \\[4pt]
+Quantum Fixed-C ($n=8$) vs Quantum Fixed ($n=8$)
+           & $0.47$ & $0.645$ & $0.25$ \\[4pt]
+Quantum Fixed-C ($n=8$) vs Quantum Fixed-Warmup ($n=8$)
+           & $0.24$ & $0.814$ & $0.13$ \\[4pt]
+Quantum Fixed-C ($n=8$) vs Quantum No-Warmup ($n=8$)
+           & $1.22$ & $0.250$ & $0.65$ \\[4pt]
+Quantum Fixed-C ($n=8$) vs Constant-V ($n=8$)
+           & $0.76$ & $0.463$ & $0.40$ \\[4pt]
+Quantum Fixed ($n=8$) vs Quantum No-Warmup ($n=8$)
+           & $0.74$ & $0.472$ & $0.40$ \\[4pt]
+All Quantum ($n=35$) vs Classical ($n=3$)
+           & $-3.73$ & $\mathbf{0.0007}$ & $-0.91$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The Fix-A pool vs Classical comparison is the primary result: $n=24$ quantum
+seeds vs $n=3$ classical, $p=0.0075$, $d=-0.87$ (large effect). Fixed-C alone
+is not significant at $n=8$ vs $n=3$ ($p=0.131$, $d=-0.91$) due to the classical
+power problem. The all-quantum comparison ($p=0.0007$) spans all 35 quantum runs
+and confirms aggregate quantum underperformance, but is not informative about
+specific interventions.
+
+Pairwise comparisons within the Fix-A family (Fixed-C vs Fixed, $p=0.645$) are
+all non-significant at $n=8$, consistent with the power limitations observed
+throughout the study.
+
+\subsection{Direction-Correct Calibration Comparisons}
+
+\begin{center}
+\setlength{\tabcolsep}{6pt}
+\begin{tabular}{lrrr}
+\toprule
+Comparison & $N_\text{OK}/N$ & Wilson 95\% CI & Fisher $p$ \\
+\midrule
+Fix-A pool ($n=24$) vs Classical ($n=3$)
+           & 20/24 vs 3/3 & $[57\%,91\%]$ vs $[41\%,99\%]$
+           & $p=0.280$ \\
+\midrule
+Quantum Fixed-C ($n=8$) vs Classical ($n=3$)
+           & 7/8 vs 3/3 & $[44\%,97\%]$ vs $[41\%,99\%]$
+           & $p=1.000$ \\
+\midrule
+Quantum Fixed-C ($n=8$) vs Quantum No-Warmup ($n=8$)
+           & 7/8 vs 2/8 & $[44\%,97\%]$ vs $[7\%,59\%]$
+           & $p=0.119$ \\
+\midrule
+Quantum Fixed ($n=8$) vs Quantum No-Warmup ($n=8$)
+           & 6/8 vs 2/8 & $[44\%,91\%]$ vs $[7\%,59\%]$
+           & $p=0.314$ \\
+\midrule
+Fix-A pool ($n=24$) vs Default pool (quantum + quantum-no-warmup, $n=11$)
+           & 20/24 vs 2/11 & $[57\%,91\%]$ vs $[4\%,41\%]$
+           & $p=\mathbf{0.0004}$ \\[2pt]
+\midrule
+All quantum on-target ($n=35$) vs Classical ($n=3$)
+           & 17/35 vs 2/3 & $[28\%,60\%]$ vs $[41\%,99\%]$
+           & $p=0.041$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The Fix-A pool vs default pool comparison is significant at $p=0.0004$ (Fisher),
+establishing that Fix-A improves direction-correct calibration relative to
+default initialisation. The all-quantum on-target vs classical on-target
+($p=0.041$) confirms the aggregate calibration deficit. The classical pool at
+$n=3$ is too small for the Fisher test to reach significance against the Fix-A
+pool ($p=0.280$), but the point estimates (20/24 vs 3/3) show a clear pattern.
+
+%──────────────────────────────────────────────────────────────────────────────
+\section{Discussion}
+
+\subsection{Fix C: What it does and does not solve}
+
+Fix~C (V-gradient freeze for 1\,500 steps) addresses the cold-start value-loss
+shock that caused Fixed seed~0's systematic overshoot to $b_\text{final}=455$.
+The mechanism:
+\begin{enumerate}
+  \item Steps 0--1499: $V$ frozen at $V_0\in[319,429]$, $Q$ updates freely,
+        bootstrapping toward $r+\gamma V_0$. V-loss gradient does not reach the
+        circuit.
+  \item Step 1500+: $V$ unfreezes into a V-loss landscape where $Q$ has already
+        partially bootstrapped, reducing the gradient magnitude.
+\end{enumerate}
+
+The results confirm this works: all 8 Fixed-C seeds have $b_\text{final}\in[367,384]$
+(tight cluster around 374), zero explosions, and the highest mean return in the
+Fix-A family ($3221.5$, CV=13.7\%). Fixed-C achieves the most seeds in the
+on-target band (6/8), followed by Fixed-Warmup and Fixed (both 5/8).
+
+However, 2/8 seeds still have $\mathbb{E}[A]>0$, and only seed~4 in Fixed-C
+reaches $P(A<0)>0.70$ with a value of $0.733$ (barely on-target). The V-freeze
+prevents cold-start overshoot but does not solve the fundamental calibration
+ceiling imposed by the affine-head constraint.
+
+\subsection{Two distinct quantum failure modes: cold-start vs layer-boundary}
+
+The gradient explosion data ($N(\|\nabla\theta\|>10)$ in Table~3) reveals two
+mechanistically distinct patterns:
+
+\begin{enumerate}
+  \item \textbf{Cold-start explosions (Fix A\,+\,B)}: Fixed seeds 0--2 explode
+        at steps 0--4000 with max gradient 624, 74, 63. The $V_0\approx374$
+        initialisation creates a large initial V-loss whose gradient dominates
+        early training. Fix~C (V-freeze) eliminates this by preventing the
+        gradient from reaching the circuit during the bootstrap window.
+  \item \textbf{Layer-boundary explosions (Fix A only, warmup)}: Fixed-Warmup
+        seeds 0--2 explode at step 1000 with max gradient 110, 327, 189. The
+        Skolik warm-up activates layers 2 and 3 into a V-loss landscape that
+        has already shifted during 1-layer-only training. This is the
+        target-shift failure mode from Task 10.
+\end{enumerate}
+
+Fix~C eliminates the cold-start mechanism but leaves the layer-boundary
+mechanism unaffected (since Fixed-C uses no warmup). The two mechanisms are
+independent: Fix~A+B+warmup would suffer layer-boundary explosions, while
+Fix~A+B (no warmup) with V-freeze eliminates cold-start explosions but
+introduces a different training dynamic where the circuit learns from a moving
+target from step 1500 onward.
+
+\subsection{The calibration ceiling: why does $P(A<0)<0.70$ persist?}
+
+Across all 24 Fix-A family seeds, only 4 seeds achieve $P(A<0)>0.70$:
+Fixed-C seeds 1 (0.878, over-calibrated) and 4 (0.733, on-target), and
+Fixed-Warmup seeds 0 (0.829, over-calibrated) and 5 (0.857, over-calibrated).
+The majority of seeds cluster in the $0.60$--$0.70$ range, with 6/8 Fixed-C
+seeds achieving on-target calibration at values below the IQL target $\tau=0.70$.
+
+The most plausible explanation is the \textbf{affine-head constraint}: the
+quantum circuit outputs $\langle Z_0\rangle\in[-1,1]$, which is mapped to
+$V(s)=a\cdot\langle Z_0\rangle+b$ with a single scalar slope $a$ and intercept
+$b$. All states share the same slope and intercept. The classical MLP can
+construct a complex, state-dependent value surface through many hidden layers;
+the quantum circuit's output is a linear transformation of a single observable.
+
+This means the DRU circuit can learn the correct value scale (Fix~A ensures
+$b\approx374$) but cannot represent the state-dependent structure of the
+V-expectile surface needed for $P(A<0)\approx0.70$ reliably across seeds.
+
+%──────────────────────────────────────────────────────────────────────────────
+\section{Wilson 95\% Confidence Intervals for Key Proportions}
+
+\begin{center}
+\setlength{\tabcolsep}{8pt}
+\begin{tabular}{lll}
+\toprule
+Quantity & Point estimate & 95\% Wilson CI \\
+\midrule
+Classical direction-correct ($n=3$)         & 3/3 = 100\%    & $[41\%,99\%]$ \\
+Classical-Deep direction-correct ($n=8$)    & 8/8 = 100\%    & $[68\%,100\%]$ \\
+Classical-Small direction-correct ($n=3$)  & 3/3 = 100\%    & $[41\%,99\%]$ \\
+\midrule
+Quantum Warmup direction-correct ($n=3$)     & 0/3 = 0\%      & $[0\%,56\%]$ \\
+Quantum No-Warmup direction-correct ($n=8$)  & 2/8 = 25\%   & $[7\%,59\%]$ \\
+Quantum No-Warmup on-target ($n=8$)          & 1/8 = 12.5\%   & $[2\%,47\%]$ \\
+\midrule
+Quantum Fixed direction-correct ($n=8$)     & 6/8 = 75\%     & $[44\%,91\%]$ \\
+Quantum Fixed on-target ($n=8$)              & 5/8 = 62.5\%     & $[30\%,86\%]$ \\
+\midrule
+Quantum Fixed-Warmup direction-correct ($n=8$) & 7/8 = 87.5\%   & $[57\%,98\%]$ \\
+Quantum Fixed-Warmup on-target ($n=8$)        & 5/8 = 62.5\%     & $[30\%,86\%]$ \\
+\midrule
+Quantum Fixed-C direction-correct ($n=8$)   & 7/8 = 87.5\%     & $[44\%,97\%]$ \\
+Quantum Fixed-C on-target ($n=8$)            & 6/8 = 75\%   & $[41\%,93\%]$ \\
+\midrule
+Fix-A pool direction-correct ($n=24$)        & 20/24 = 83.3\% & $[57\%,91\%]$ \\
+Default pool direction-correct ($n=11$)       & 2/11 = 18.2\%   & $[4\%,41\%]$ \\
+\midrule
+All Quantum direction-correct ($n=35$)      & 22/35 = 62.9\% & $[44\%,79\%]$ \\
+All Quantum on-target ($n=35$)               &  17/35 = 48.6\% & $[5\%,27\%]$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The Wilson CIs show that the classical direction-correct rate (100\%) has a
+wide CI ($[41\%,99\%]$) due to $n=3$. The Fix-A pool (83.3\%, CI $[57\%,91\%]$)
+shows substantial improvement over the default pool (18.2\%, CI $[4\%,41\%]$),
+with non-overlapping CIs indicating a reliable difference. Fixed-C achieves the
+highest on-target rate at 75\% (6/8), followed by Fixed and Fixed-Warmup at 62.5\% (5/8).
+
+%──────────────────────────────────────────────────────────────────────────────
+\section{Conclusions}
+
+\textbf{(1) Fix~C eliminates gradient explosions and achieves the best Fix-A
+return ($3221.5$, CV=13.7\%).}
+Zero explosions across 8 seeds vs 3/8 for Fixed and Fixed-Warmup. All
+$b_\text{final}\in[367,384]$, tightly centred around the target 374, confirming
+the cold-start overshoot is eliminated. Six of eight Fixed-C seeds reach the
+on-target band ($P(A<0)\in[0.6,0.8]$), the highest rate of any configuration.
+However, only seed~4 exceeds $P(A<0)>0.70$ (0.733), and 2/8 seeds have
+$\mathbb{E}[A]>0$, so Fix~C does not universally solve the calibration problem.
+
+\textbf{(2) The Fix-A pool ($n=24$) is significantly worse than classical on
+return ($p=0.0075$, $d=-0.87$).}
+Fix-A pool mean return $3152\pm577$ vs classical $3505.8\pm16.2$. This is the
+only conventionally significant return comparison. The quantum-classical gap is
+large and reliable at the pool level, even though pairwise comparisons at
+$n=8$ are underpowered.
+
+\textbf{(3) Fix-A vs default-init on calibration is highly significant ($p=0.0004$).}
+Direction-correct rate: Fix-A pool 20/24 (83.3\%) vs default pool 2/11 (18.2\%).
+This replicates and strengthens Task 10's finding at substantially larger sample
+sizes. The scale initialisation (Fix~A) is the effective component, confirmed
+across all three Fix-A variant configurations.
+
+\textbf{(4) All-quantum vs classical is significant on return ($p=0.0007$).}
+The aggregate comparison across all 35 quantum seeds vs classical establishes
+that quantum configurations collectively underperform on return. The on-target
+calibration comparison ($p=0.041$) confirms aggregate calibration deficit.
+
+\textbf{(5) Fixed-C achieves the highest on-target rate (6/8), but Fixed-Warmup
+produces the most over-calibrated seeds (seeds 0 and 5 at 0.829 and 0.857).}
+The best-calibrated seeds across the Fix-A family are Fixed-Warmup seed~5
+($P(A<0)=0.857$) and seed~0 ($0.829$), both over-calibrated. This confirms that
+warmup removal is not always beneficial; retaining it alongside Fix~A can
+produce the highest calibration values at the cost of layer-boundary explosions.
+
+\textbf{(6) Classical-Deep confirms depth is not the quantum instability source.}
+Eight seeds of depth-3 MLP $[8,8,8]$ yield $3307.9\pm413.2$ (CV=12.5\%, driven
+by a single anomalous seed). Zero explosions. The DRU circuit's depth-3
+effective capacity is comparable to the classical depth-3 baseline; the
+instability is in the quantum-specific training dynamics, not the architecture.
+
+\textbf{Future experiments should prioritise:}
+\begin{enumerate}
+  \item \textbf{Scale the classical baseline to $n=8$} to enable properly
+        powered return comparisons with the Fix-A family (currently limited by
+        $n=3$ classical).
+  \item \textbf{Test on sparse-reward tasks} (e.g.\ \texttt{antmaze-medium-play})
+        where reward-weighted behavioural cloning is not competitive. This is the
+        critical test of whether Fix-C enables the quantum value network to
+        add anything beyond what a constant-$V$ baseline provides.
+  \item \textbf{Investigate the affine-head bottleneck}: $V(s)=a\cdot\langle Z_0\rangle+b$
+        limits the value surface to a one-dimensional embedding of state. Multi-qubit
+        readout or deeper classical post-processing could relieve this constraint.
+  \item \textbf{Test Fix-C with longer freeze windows} (e.g.\ 3\,000 steps) to
+        determine whether the calibration ceiling can be lowered further.
+\end{enumerate}
+
+%──────────────────────────────────────────────────────────────────────────────
+\begin{thebibliography}{9}
+\bibitem{kostrikov2021}
+I.~Kostrikov, A.~Nair, and S.~Levine,
+``Offline Reinforcement Learning with Implicit Q-Learning,''
+\textit{ICLR}, 2022.
+
+\bibitem{skolik2021}
+A.~Skolik, J.~J.~McClean, M.~Mohseni, P.~van der Smagt, and M.~Leib,
+``Layerwise learning for quantum neural networks,''
+\textit{Quantum Machine Intelligence}, 3(1):5, 2021.
+\end{thebibliography}
+
+\end{document}

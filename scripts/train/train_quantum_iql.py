@@ -43,7 +43,7 @@ import wandb
 
 _sys.path.insert(0, _os.path.join(_os.path.dirname(__file__)))
 
-from quantum_iql.buffer import load_minari_dataset
+from quantum_iql.buffer import load_custom_dataset, load_minari_dataset
 from quantum_iql.quantum_config import QuantumIQLConfig, load_quantum_config
 from quantum_iql.quantum_trainer import QuantumIQLTrainer
 from quantum_iql.utils import get_device, make_env, set_seed
@@ -73,6 +73,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Zero or more dot-notation overrides, e.g.\n"
             "  mode=quantum  tau=0.9  seed=1\n"
             "  quantum_value.n_qubits=4  quantum_value.device_name=default.qubit"
+        ),
+    )
+    parser.add_argument(
+        "--dataset-path",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a custom dataset directory (from scripts/generate_pointmaze_dataset.py).\n"
+            "If provided, uses load_custom_dataset instead of load_minari_dataset.\n"
+            "Example: --dataset-path ./datasets/pointmaze_expert"
         ),
     )
     return parser.parse_args(argv)
@@ -152,7 +162,11 @@ def main(argv: list[str] | None = None) -> None:
 
     # ── Data + env ─────────────────────────────────────────────────────────
     print(f"\nLoading dataset '{cfg.dataset_id}' …")
-    buffer = load_minari_dataset(cfg.dataset_id, device="cpu")
+    if args.dataset_path:
+        print(f"  Using custom dataset from: {args.dataset_path}")
+        buffer = load_custom_dataset(args.dataset_path, device="cpu")
+    else:
+        buffer = load_minari_dataset(cfg.dataset_id, device="cpu")
     print(f"  buffer size    : {buffer._size:,} transitions")
     print(f"  obs_dim        : {buffer.obs_dim}")
     print(f"  act_dim        : {buffer.act_dim}\n")

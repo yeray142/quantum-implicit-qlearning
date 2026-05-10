@@ -4,7 +4,12 @@ Ablation Study: Diagnosing and Fixing V(s) in Hybrid Q-IQL
 ===========================================================
 
 Phase 1 (diagnostic):
-  constant-v        -- V(s) ≡ 100 (frozen). Decisive test of V contribution.
+  constant-v        -- V(s) ≡ env_cfg.v_constant (frozen, default 100).
+                       Decisive test of V contribution. Per-env override
+                       v_constant ≈ E[Q] under the dataset to neutralize
+                       percentile-filter biases and isolate the genuine
+                       question: "does state-CONDITIONAL V learning add
+                       anything beyond a flat mean baseline?".
   classical-deep    -- Depth-3 MLP [8,8,8], depth-matched to DRU.
   quantum-no-warmup -- All 3 DRU layers active from step 0.
 
@@ -16,6 +21,16 @@ Phase 2 (repair):
   quantum-fixed-c        -- Fix A + Fix B + Fix C: V-gradient freeze for first 1500 steps.
                             Allows Q to bootstrap toward r + γ·374 before V begins moving.
 
+Experiment 2 (structural test):
+  quantum-multi-qubit-readout -- Replace V(s) = a·⟨Z₀⟩+b with V(s) = Σᵢ aᵢ⟨Zᵢ⟩+b
+                            (8 trainable readout coefficients, +7 params).
+                            Run with Fix A+B+C at n=8. The architectural-ceiling
+                            hypothesis predicts on-target rate should rise above 6/8
+                            and seeds should reliably approach τ=0.70 from below.
+
+Experiment 3 (classical baseline):
+  classical          -- Standard classical IQL with seeds 0-7 for proper statistical power.
+
 Usage
 -----
   # All diagnostic modes (default):
@@ -24,12 +39,11 @@ Usage
   # Repair experiments on Hopper, seeds 0-7:
   python experiments/ablation_study.py --modes quantum-fixed quantum-fixed-c --seeds 0 1 2 3 4 5 6 7
 
-  # Transfer: quantum-fixed + baseline on Walker2d:
-  python experiments/ablation_study.py --modes quantum-fixed constant-v classical \\
-      --env walker2d --seeds 0 1 2
+  # Multi-qubit readout experiment (Fix A+B+C, n=8):
+  python experiments/ablation_study.py --modes quantum-multi-qubit-readout --seeds 0 1 2 3 4 5 6 7
 
-  # PointMaze validation (Task 11): Fix-C, Classical, Constant-V, seeds 0-4:
-  python experiments/ablation_study.py --pointmaze
+  # Classical baseline n=8 with proper seed count:
+  python experiments/ablation_study.py --modes classical --seeds 0 1 2 3 4 5 6 7
 
   # Dry-run:
   python experiments/ablation_study.py --dry-run
@@ -41,6 +55,8 @@ import argparse
 import sys
 from pathlib import Path
 
+import gymnasium as gym
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -87,19 +103,11 @@ _ENV_REGISTRY: dict[str, dict] = {
         "a_init":  55.0,
         "group":  "hopper-medium",
     },
-    "pointmaze": {
-        "dataset_id": "D4RL/pointmaze/umaze-v2",
-        "env_id":     "PointMaze_UMaze-v3",
-        "tau":   0.7,
-        "beta":  3.0,
-        "v_init": 100.0,   # mean_episode_return / (1-gamma) = 1.0 / 0.01
-        "a_init":  0.02,   # std(episode_returns) ≈ 0.02; sparse terminal reward
-        "group":  "pointmaze-umaze",
-    },
 }
 
 # ── Shared constants ──────────────────────────────────────────────────────────
-V_CONSTANT   = 100.0          # constant used in constant-v ablation
+V_CONSTANT   = 100.0          # default for constant-v ablation;
+                              # overridden per-env via env_cfg["v_constant"]
 NUM_STEPS    = 100_000
 EVAL_INTERVAL= 5_000
 LOG_INTERVAL = 1_000
@@ -109,7 +117,11 @@ DEEP_HIDDEN  = [8, 8, 8]
 ALL_MODES = [
     "constant-v", "classical", "classical-deep",
     "quantum-no-warmup", "quantum-fixed", "quantum-fixed-warmup", "quantum-fixed-c",
+    "quantum-multi-qubit-readout",
 ]
+
+
+# ── ConstantV trainer ─────────────────────────────────────────────────────────
 
 class ConstantValueNetwork(nn.Module):
     """V(s) = constant for all s. No trainable parameters."""
@@ -124,14 +136,13 @@ class ConstantValueNetwork(nn.Module):
         return self.constant.expand(obs.shape[0], 1)
 
 
-# ── ConstantV trainer ─────────────────────────────────────────────────────────
-
 class ConstantVIQLTrainer(IQLTrainer):
     """IQL with V frozen at a constant. V update is a no-op."""
 
-    def __init__(self, config, buffer, env, checkpoint_dir: Path) -> None:
+    def __init__(self, config, buffer, env, checkpoint_dir: Path,
+                 v_constant: float = V_CONSTANT) -> None:
         self._checkpoint_dir = checkpoint_dir
-        self._v_constant = V_CONSTANT
+        self._v_constant = v_constant
         super().__init__(config, buffer, env)
 
     def _build_networks(self) -> None:
@@ -297,6 +308,15 @@ def _build_config(mode: str, seed: int, env_cfg: dict) -> QuantumIQLConfig:
         cfg.fix_c_enabled  = True
         cfg.v_freeze_steps = 1500
 
+    elif mode == "quantum-multi-qubit-readout":
+        cfg.mode = "quantum"
+        cfg.quantum_value = _quantum_cfg(use_warmup=False, total_steps=NUM_STEPS)
+        cfg.quantum_value.multi_qubit_readout = True
+        cfg.quantum_batch_size = 256
+        # Fix C: freeze V gradient for first v_freeze_steps to mitigate cold-start overshoot
+        cfg.fix_c_enabled = True
+        cfg.v_freeze_steps = 1500
+
     else:
         raise ValueError(f"Unknown mode: {mode!r}")
 
@@ -308,18 +328,22 @@ def _build_config(mode: str, seed: int, env_cfg: dict) -> QuantumIQLConfig:
 def run_ablation(mode: str, seed: int, env_name: str,
                  wandb_offline: bool = False) -> None:
     env_cfg   = _ENV_REGISTRY[env_name]
-    dataset_q = env_cfg["dataset_id"].split("/")[-1].replace("-v0", "")  # "medium"
+    dataset_q = env_cfg["dataset_id"].split("/")[-1].replace("-v0", "")  # e.g. "umaze-expert"
     run_name  = f"{mode}-{env_name}-{dataset_q}-s{seed}"
     group     = env_cfg["group"]
     v_init    = env_cfg["v_init"]
     a_init    = env_cfg["a_init"]
+    v_constant   = env_cfg.get("v_constant",   V_CONSTANT)
+    reward_shift = env_cfg.get("reward_shift", 0.0)
 
     print(f"\n{'='*65}")
     print(f"  {run_name}  ({NUM_STEPS:,} steps)")
     print(f"{'='*65}")
 
     set_seed(seed)
-    buffer = load_minari_dataset(env_cfg["dataset_id"], device="cpu")
+    buffer = load_minari_dataset(
+        env_cfg["dataset_id"], device="cpu", reward_shift=reward_shift,
+    )
     cfg    = _build_config(mode, seed, env_cfg)
 
     checkpoint_dir = (
@@ -335,7 +359,8 @@ def run_ablation(mode: str, seed: int, env_name: str,
             "seed": seed,
             "v_init": v_init if "fixed" in mode else None,
             "a_init": a_init if "fixed" in mode else None,
-            "v_constant": V_CONSTANT if mode == "constant-v" else None,
+            "v_constant":   v_constant if mode == "constant-v" else None,
+            "reward_shift": reward_shift if reward_shift != 0.0 else None,
         },
         mode="offline" if wandb_offline else "online",
         reinit=True,
@@ -345,10 +370,11 @@ def run_ablation(mode: str, seed: int, env_name: str,
     set_seed(seed, env=gymnasium_env)
 
     if mode == "constant-v":
-        trainer = ConstantVIQLTrainer(cfg, buffer, gymnasium_env, checkpoint_dir)
+        trainer = ConstantVIQLTrainer(cfg, buffer, gymnasium_env, checkpoint_dir,
+                                      v_constant=v_constant)
         v_params = 0
 
-    elif mode in ("quantum-fixed", "quantum-fixed-warmup", "quantum-fixed-c"):
+    elif mode in ("quantum-fixed", "quantum-fixed-warmup", "quantum-fixed-c", "quantum-multi-qubit-readout"):
         trainer = QuantumFixedTrainer(
             cfg, buffer, gymnasium_env, checkpoint_dir,
             v_init=v_init, a_init=a_init,
@@ -395,62 +421,21 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--env", default="hopper", choices=list(_ENV_REGISTRY),
-        help="Environment (default: hopper). Use 'walker2d' for transfer test.",
+        help="Environment (default: hopper).",
     )
     p.add_argument("--seeds",         nargs="+", type=int, default=[0, 1, 2])
     p.add_argument("--wandb-offline", action="store_true")
     p.add_argument("--dry-run",       action="store_true")
-    p.add_argument("--pointmaze",     action="store_true",
-                   help="Run PointMaze validation: Fix-C, Classical, Constant-V (seeds 0-4).")
+    p.add_argument("--num-steps",     type=int, default=None,
+                   help="Override NUM_STEPS (default: 100_000). Example: --num-steps 1000000")
     return p.parse_args()
 
 
 def main() -> None:
+    global NUM_STEPS
     args    = parse_args()
-
-    if args.pointmaze:
-        env_cfg = _ENV_REGISTRY["pointmaze"]
-        pointmaze_modes = ["quantum-fixed-c", "classical", "constant-v"]
-        pointmaze_seeds = [0, 1, 2, 3, 4]
-        grid = [(mode, seed) for mode in pointmaze_modes for seed in pointmaze_seeds]
-
-        print("\n" + "=" * 70)
-        print("  PointMaze Validation — Task 11")
-        print("  Modes: Fix-C, Classical, Constant-V  |  Seeds: 0–4  |  Steps: 100k")
-        print("=" * 70)
-        print(f"  Fix-C:  V-gradient freeze first 1500 steps + no-warmup")
-        print(f"  Classical: MLP [256,256] value network")
-        print(f"  Constant-V: V(s) = 100 (frozen baseline)")
-        print(f"  Goal: Fix-C significantly outperforms Constant-V → task-independent evidence")
-        print()
-
-        def _cfg_for_mode(mode: str):
-            return _build_config(mode, seed=0, env_cfg=env_cfg)
-        print_grid_summary(grid, NUM_STEPS, _cfg_for_mode, "pointmaze", env_cfg)
-
-        failed: list[tuple] = []
-        for i, (mode, seed) in enumerate(grid, 1):
-            print(f"\n[{i}/{len(grid)}] {mode} / pointmaze / seed={seed}")
-            try:
-                run_ablation(mode, seed, env_name="pointmaze",
-                             wandb_offline=args.wandb_offline)
-            except Exception as exc:
-                import traceback
-                print(f"  ERROR: {exc}")
-                traceback.print_exc()
-                failed.append((mode, seed, str(exc)))
-                try:
-                    wandb.finish(exit_code=1)
-                except Exception:
-                    pass
-
-        print(f"\n{'='*65}")
-        print(f"  PointMaze Done: {len(grid)-len(failed)}/{len(grid)} succeeded")
-        if failed:
-            for mode, seed, msg in failed:
-                print(f"    FAILED: {mode}/seed={seed}: {msg}")
-        print(f"{'='*65}")
-        return
+    if args.num_steps is not None:
+        NUM_STEPS = args.num_steps
 
     env_cfg = _ENV_REGISTRY[args.env]
 
