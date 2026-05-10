@@ -105,7 +105,7 @@ class IQLTrainer:
         ``critic_loss``.  Q has no separate target network because V̄
         already plays that role in the Bellman backup.
         """
-        self.value_target = ValueNetwork(
+        self.value_target: ValueNetwork = ValueNetwork(
             self.buffer.obs_dim,
             hidden_dims=self.cfg.value_net.hidden_dims,
             activation=self.cfg.value_net.activation,

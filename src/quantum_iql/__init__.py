@@ -3,8 +3,6 @@
 from .buffer import Batch, ReplayBuffer, load_minari_dataset
 from .config import IQLConfig, NetworkConfig, load_config
 from .networks import ActorNetwork, CriticNetwork, ValueNetwork, build_mlp
-from .quantum_value_network import QuantumValueNetwork
-from .trainer import IQLTrainer
 
 # Hybrid quantum-classical pipeline (issue #9)
 from .quantum_config import (  # noqa: E402
@@ -15,6 +13,8 @@ from .quantum_config import (  # noqa: E402
     make_layerwise_schedule,
 )
 from .quantum_trainer import QuantumIQLTrainer  # noqa: E402
+from .quantum_value_network import QuantumValueNetwork
+from .trainer import IQLTrainer
 
 __version__ = "0.1.0"
 

@@ -39,18 +39,20 @@ def get_device(device_str: str) -> torch.device:
     return torch.device(device_str)
 
 
+_ROBOTICS_REGISTERED: bool = False
+
+
 def make_env(env_id: str, seed: int) -> gym.Env:
     """Create and seed a Gymnasium environment."""
-    # Auto-register robotics envs (PointMaze, AntMaze, etc.) on first call
-    if not make_env._robotics_registered:
+    global _ROBOTICS_REGISTERED
+    if not _ROBOTICS_REGISTERED:
         try:
             from gymnasium_robotics import register_robotics_envs
             register_robotics_envs()
         except Exception:
             pass
-        make_env._robotics_registered = True
+        _ROBOTICS_REGISTERED = True
     env = gym.make(env_id)
     env.reset(seed=seed)
     env.action_space.seed(seed)
     return env
-make_env._robotics_registered = False

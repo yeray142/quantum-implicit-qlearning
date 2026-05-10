@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
-from quantum_value_network import QuantumValueNetwork
+from quantum_iql import QuantumValueNetwork
 
 from quantum_iql.buffer import Batch, ReplayBuffer
 from quantum_iql.quantum_config import (

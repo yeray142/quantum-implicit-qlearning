@@ -50,9 +50,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-# Quantum components
-from .quantum_value_network import QuantumValueNetwork
-
 import wandb
 
 from .buffer import Batch, ReplayBuffer
@@ -61,6 +58,9 @@ from .networks import ActorNetwork, CriticNetwork, ValueNetwork
 
 # Hybrid config (this issue)
 from .quantum_config import QuantumIQLConfig
+
+# Quantum components
+from .quantum_value_network import QuantumValueNetwork
 from .trainer import IQLTrainer
 from .utils import hard_update
 
@@ -165,7 +165,7 @@ class QuantumIQLTrainer(IQLTrainer):
         # ── Value network: quantum or classical ────────────────────────────
         if cfg.mode == "quantum":
             qv = cfg.quantum_value
-            self.value_net: ValueNetwork | QuantumValueNetwork = QuantumValueNetwork(
+            self.value_net = QuantumValueNetwork(
                 n_qubits=qv.n_qubits,
                 n_layers=qv.n_layers,
                 obs_dim=obs_dim,
@@ -174,7 +174,7 @@ class QuantumIQLTrainer(IQLTrainer):
                 running_stats=qv.running_stats,
                 use_pre_encoder=qv.use_pre_encoder,
                 multi_qubit_readout=qv.multi_qubit_readout,
-            ).to(self.device)
+            ).to(self.device)  # type: ignore[assignment]
             self._is_quantum = True
             pre_mode = "pre_encode" if qv.use_pre_encoder else "truncate"
             print(
@@ -216,7 +216,7 @@ class QuantumIQLTrainer(IQLTrainer):
                 diff_method=qv.diff_method,
                 running_stats=qv.running_stats,
                 multi_qubit_readout=qv.multi_qubit_readout,
-            ).to(self.device)
+            ).to(self.device)  # type: ignore[assignment]
             hard_update(self.value_target, self.value_net)
         else:
             vcfg = cfg.value_net

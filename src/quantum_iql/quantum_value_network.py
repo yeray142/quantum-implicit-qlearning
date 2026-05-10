@@ -22,6 +22,8 @@ import pennylane as qml
 import torch
 import torch.nn as nn
 
+from typing import Any
+
 
 # Helpers
 def _arctan_encode(s: torch.Tensor, mu: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
@@ -88,7 +90,7 @@ def _build_qnode(
         w: torch.Tensor,       # (n_layers, n_qubits, 3)
         xs: torch.Tensor,      # (B, n_qubits)  ← full batch
         active_layers: int,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | list[Any]:
         _cz_preamble(n_qubits)
 
         for layer_idx in range(active_layers):
@@ -192,6 +194,8 @@ class QuantumValueNetwork(nn.Module):
     def update_running_stats(self, mu: torch.Tensor, sigma: torch.Tensor) -> None:
         if not self._running_stats:
             raise RuntimeError("running_stats=False; pass mu/sigma explicitly to forward().")
+        if self.mu is None or self.sigma is None:
+            raise RuntimeError("mu/sigma buffers are not initialized.")
         self.mu.copy_(mu)
         self.sigma.copy_(sigma)
 
@@ -213,6 +217,8 @@ class QuantumValueNetwork(nn.Module):
 
         _mu    = mu    if mu    is not None else self.mu
         _sigma = sigma if sigma is not None else self.sigma
+        if _mu is None or _sigma is None:
+            raise RuntimeError("mu and sigma must be provided or running_stats must be True.")
 
         xs = _arctan_encode(s, _mu, _sigma)   # (B, obs_dim)
 
