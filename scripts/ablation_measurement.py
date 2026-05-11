@@ -95,9 +95,9 @@ BASE_BATCH        = 256
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 QUANTUM_DEVICE      = "default.qubit"
-QUANTUM_DIFF_METHOD = "backprop" if torch.cuda.is_available() else "adjoint"
+QUANTUM_DIFF_METHOD = "adjoint"  # backprop silently zeros grads with per-sample loop
 
-RESULTS_DIR = Path("results/ablations_measurement")
+RESULTS_DIR = Path("results/ablation_measurement")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── Ablation axis definitions ─────────────────────────────────────────────────
@@ -311,21 +311,23 @@ class FlexQuantumValueNetwork(nn.Module):
         xs = self._encode(obs).requires_grad_(True)   # (B, n_qubits)
 
         if self._scalar_meas:
-            # Circuit returns a scalar → vmap directly
-            out = torch.vmap(
-                lambda x: self._circuit(self.theta, self.w, x).to(torch.float32)
-            )(xs)
+            out = torch.stack([
+                self._circuit(self.theta, self.w, xs[i]).to(torch.float32)
+                for i in range(xs.shape[0])
+            ])
         elif self.measurement == "mean_pauli_z":
-            def _eval(x):
-                raw = self._circuit(self.theta, self.w, x)
-                return torch.stack([r.to(torch.float32) for r in raw]).mean()
-            out = torch.vmap(_eval)(xs)
+            out = torch.stack([
+                torch.stack([r.to(torch.float32)
+                             for r in self._circuit(self.theta, self.w, xs[i])]).mean()
+                for i in range(xs.shape[0])
+            ])
         else:   # learned
             w_norm = torch.softmax(self.meas_weights, dim=0)
-            def _eval(x):
-                raw = self._circuit(self.theta, self.w, x)
-                return (torch.stack([r.to(torch.float32) for r in raw]) * w_norm).sum()
-            out = torch.vmap(_eval)(xs)
+            out = torch.stack([
+                (torch.stack([r.to(torch.float32)
+                              for r in self._circuit(self.theta, self.w, xs[i])]) * w_norm).sum()
+                for i in range(xs.shape[0])
+            ])
 
         return out * self.out_scale + self.out_bias
 
@@ -1167,7 +1169,7 @@ def main() -> None:
     hw = (f"GPU · {torch.cuda.get_device_name(0)}"
           if torch.cuda.is_available() else "CPU only")
     print(f"\n{'='*65}")
-    print(f"  Quantum-IQL Circuit Ablation — Topology / Measurement / Datasize")
+    print(f"  [QUANTUM_IQL_ABLATION_MEASUREMENT]  Quantum-IQL Circuit Ablation — Topology / Measurement / Datasize")
     print(f"  Hardware : {hw}")
     print(f"  Env      : {args.env}  ({env_cfg['dataset_id']})")
     print(f"  Ablations: {', '.join(args.ablation)}")
