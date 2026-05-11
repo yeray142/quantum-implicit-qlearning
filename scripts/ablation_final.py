@@ -94,8 +94,17 @@ BASE_GAMMA        = 0.99
 BASE_BATCH        = 256
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-QUANTUM_DEVICE      = "default.qubit"
-QUANTUM_DIFF_METHOD = "adjoint"  # backprop silently zeros grads with per-sample loop
+# Use lightning.gpu if available (10-100x faster on B200), fall back to default.qubit
+try:
+    import pennylane as _qml_test
+    _dev_test = _qml_test.device("lightning.gpu", wires=1)
+    QUANTUM_DEVICE      = "lightning.gpu"
+    QUANTUM_DIFF_METHOD = "adjoint"
+    print("[DEVICE] lightning.gpu available — using GPU-accelerated simulation")
+except Exception:
+    QUANTUM_DEVICE      = "default.qubit"
+    QUANTUM_DIFF_METHOD = "adjoint"
+    print("[DEVICE] lightning.gpu not available — falling back to default.qubit on CPU")
 
 RESULTS_DIR = Path("results/ablation_all")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -296,7 +305,7 @@ class FlexQuantumValueNetwork(nn.Module):
         ).sqrt().clamp(min=1e-6)
 
     def _encode(self, obs: torch.Tensor) -> torch.Tensor:
-        xs = torch.arctan((obs - self.obs_mean) / (self.obs_std + 1e-8))
+        xs = torch.arctan((obs - self.obs_mean.to(obs.device)) / (self.obs_std.to(obs.device) + 1e-8))
         if xs.shape[1] > self.n_qubits:
             xs = xs[:, :self.n_qubits]
         elif xs.shape[1] < self.n_qubits:
@@ -309,31 +318,27 @@ class FlexQuantumValueNetwork(nn.Module):
         if self.training:
             self._update_running_stats(obs.detach())
         orig_device = obs.device
-        # adjoint diff method always returns CPU tensors — move everything to CPU for circuit
-        xs = self._encode(obs.cpu()).requires_grad_(True)
-        theta_cpu = self.theta.cpu()
-        w_cpu     = self.w.cpu()
+        xs = self._encode(obs).requires_grad_(True)
 
         if self._scalar_meas:
             out = torch.stack([
-                self._circuit(theta_cpu, w_cpu, xs[i]).to(torch.float32)
+                self._circuit(self.theta, self.w, xs[i]).to(torch.float32)
                 for i in range(xs.shape[0])
             ])
         elif self.measurement == "mean_pauli_z":
             out = torch.stack([
                 torch.stack([r.to(torch.float32)
-                             for r in self._circuit(theta_cpu, w_cpu, xs[i])]).mean()
+                             for r in self._circuit(self.theta, self.w, xs[i])]).mean()
                 for i in range(xs.shape[0])
             ])
         else:   # learned
-            w_norm = torch.softmax(self.meas_weights.cpu(), dim=0)
+            w_norm = torch.softmax(self.meas_weights, dim=0)
             out = torch.stack([
                 (torch.stack([r.to(torch.float32)
-                              for r in self._circuit(theta_cpu, w_cpu, xs[i])]) * w_norm).sum()
+                              for r in self._circuit(self.theta, self.w, xs[i])]) * w_norm).sum()
                 for i in range(xs.shape[0])
             ])
 
-        # move back to original device for loss computation
         out = out.to(orig_device)
         return out * self.out_scale + self.out_bias
 
