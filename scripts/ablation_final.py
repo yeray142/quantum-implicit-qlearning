@@ -11,10 +11,10 @@ NOT included here (separate scripts):
 
 Usage
 -----
-  python scripts/circuit_ablation_main.py --ablation topology measurement
-  python scripts/circuit_ablation_main.py --ablation datasize --seeds 0 1 2 3 4
-  python scripts/circuit_ablation_main.py --ablation fourier expr
-  python scripts/circuit_ablation_main.py --ablation topology measurement datasize fourier expr --dry-run
+  python experiments/circuit_ablation_main.py --ablation topology measurement
+  python experiments/circuit_ablation_main.py --ablation datasize --seeds 0 1 2 3 4
+  python experiments/circuit_ablation_main.py --ablation fourier expr
+  python experiments/circuit_ablation_main.py --ablation topology measurement datasize fourier expr --dry-run
 """
 from __future__ import annotations
 
@@ -36,23 +36,21 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 sys.path.insert(0, str(_PROJECT_ROOT / "scripts"))
 
-print("[BOOT] Importing pennylane...", flush=True)
+import matplotlib
+matplotlib.use("Agg")  # non-interactive backend for server
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import matplotlib.colors as mcolors
 import pennylane as qml
-print("[BOOT] Importing wandb...", flush=True)
 import wandb
-print("[BOOT] Importing scipy...", flush=True)
 from scipy import stats as scipy_stats
 
-print("[BOOT] Importing quantum_iql modules...", flush=True)
 from quantum_iql.buffer import Batch, ReplayBuffer, load_minari_dataset
 from quantum_iql.losses import critic_loss as _critic_loss, value_loss
 from quantum_iql.networks import CriticNetwork, ValueNetwork
-# FIX: QuantumIQLConfig/QuantumNetConfig don't exist → use IQLConfig/NetworkConfig
 from quantum_iql.config import IQLConfig, NetworkConfig
-# FIX: QuantumIQLTrainer doesn't exist → use IQLTrainer
 from quantum_iql.trainer import IQLTrainer
 from quantum_iql.utils import set_seed
-print("[BOOT] All imports OK.", flush=True)
 
 # ── Environment / dataset registry ───────────────────────────────────────────
 
@@ -103,6 +101,8 @@ RESULTS_DIR = Path("results/circuit_ablations")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── Ablation axis definitions ─────────────────────────────────────────────────
+# Each entry: condition_key -> dict of kwargs forwarded to _build_trainer_config
+# or to FlexQuantumValueNetwork.
 
 LAYERS_CONDITIONS = {
     "n_layers=1(q=4)": dict(n_qubits=4, n_layers=1),
@@ -113,12 +113,13 @@ LAYERS_CONDITIONS = {
 TOPOLOGY_CONDITIONS = ["none", "linear", "circular", "all_to_all"]
 
 QUBIT_CONDITIONS = {
-    "n_qubits=2": dict(n_qubits=2, n_layers=1),
+    "n_qubits=2": dict(n_qubits=2, n_layers=1),   # 1 layer max for 2 qubits
     "n_qubits=4": dict(n_qubits=4, n_layers=2),   # base
     "n_qubits=6": dict(n_qubits=6, n_layers=2),
     "n_qubits=8": dict(n_qubits=8, n_layers=2),
 }
 
+# (n_qubits, n_layers) pairs satisfying L <= floor(log2(n_qubits))
 QUBIT_LAYER_GRID = [
     (2, 1),
     (4, 1), (4, 2),   # (4,2) = base ★
@@ -159,22 +160,17 @@ def _n_params(n_qubits: int, n_layers: int) -> int:
     return n_qubits * n_layers * 3 * 2   # theta + w, each (n_layers, n_qubits, 3)
 
 
-# ── Trainer config builder ────────────────────────────────────────────────────
-# FIX: removed quantum-specific fields (lr_quantum, fix_c_enabled, etc.) that
-#      don't exist in IQLConfig. Only fields present in IQLConfig are passed.
+# ── Trainer config builder (for QuantumIQLTrainer-based ablations) ────────────
 
 def _build_trainer_config(
-    n_steps:    int   = NUM_STEPS,
-    seed:       int   = 0,
-    dataset_id: str   = _ENV_REGISTRY["hopper"]["dataset_id"],
-    env_id:     str   = _ENV_REGISTRY["hopper"]["env_id"],
+    n_qubits: int = BASE_N_QUBITS,
+    n_layers: int = BASE_N_LAYERS,
+    n_steps:  int = NUM_STEPS,
+    seed:     int = 0,
+    dataset_id: str = _ENV_REGISTRY["hopper"]["dataset_id"],
+    env_id:     str = _ENV_REGISTRY["hopper"]["env_id"],
     tau:        float = BASE_TAU,
-    # n_qubits / n_layers accepted but ignored here (used by FlexQVN path)
-    n_qubits:   int   = BASE_N_QUBITS,
-    n_layers:   int   = BASE_N_LAYERS,
 ) -> IQLConfig:
-    print(f"    [config] building IQLConfig  dataset={dataset_id}  "
-          f"steps={n_steps}  seed={seed}  tau={tau}", flush=True)
     return IQLConfig(
         dataset_id  = dataset_id,
         env_id      = env_id,
@@ -187,9 +183,9 @@ def _build_trainer_config(
         batch_size  = BASE_BATCH,
         num_steps   = n_steps,
         log_interval= LOG_INTERVAL,
-        eval_interval= n_steps + 1,   # skip mid-run evals for speed
+        eval_interval= n_steps + 1,
         wandb_project= WANDB_PROJECT,
-        wandb_offline= True,
+        wandb_offline= False,
         seed        = seed,
         device      = "auto",
     )
@@ -238,9 +234,6 @@ class FlexQuantumValueNetwork(nn.Module):
         self.obs_dim      = obs_dim
         self.entanglement = entanglement
         self.measurement  = measurement
-
-        print(f"    [FlexQVN] init  n_qubits={n_qubits}  n_layers={n_layers}  "
-              f"entanglement={entanglement}  measurement={measurement}", flush=True)
 
         self.register_buffer("obs_mean",  torch.zeros(obs_dim))
         self.register_buffer("obs_std",   torch.ones(obs_dim))
@@ -291,7 +284,6 @@ class FlexQuantumValueNetwork(nn.Module):
 
         self._circuit      = _circuit
         self._scalar_meas  = scalar_meas
-        print(f"    [FlexQVN] circuit built OK  params={_n_params(n_qubits, n_layers)}", flush=True)
 
     @torch.no_grad()
     def _update_running_stats(self, obs: torch.Tensor) -> None:
@@ -319,6 +311,7 @@ class FlexQuantumValueNetwork(nn.Module):
         xs = self._encode(obs).requires_grad_(True)   # (B, n_qubits)
 
         if self._scalar_meas:
+            # Circuit returns a scalar → vmap directly
             out = torch.vmap(
                 lambda x: self._circuit(self.theta, self.w, x).to(torch.float32)
             )(xs)
@@ -351,19 +344,16 @@ class _FlexWrap(nn.Module):
 # ── Core training loops ───────────────────────────────────────────────────────
 
 def _run_trainer_seed(
-    buffer:  ReplayBuffer,
-    cfg:     IQLConfig,        # FIX: was QuantumIQLConfig
+    buffer: ReplayBuffer,
+    cfg:    IQLConfig,
     n_steps: int,
-    seed:    int,
+    seed:   int,
 ) -> dict:
     """One seed via IQLTrainer (layers / qubits / qubit_layer / datasize)."""
-    print(f"    [trainer] seed={seed}  n_steps={n_steps}  "
-          f"buffer_size={len(buffer)}", flush=True)
     set_seed(seed)
-    trainer = IQLTrainer(cfg, buffer, env=None)   # FIX: was QuantumIQLTrainer
+    trainer = IQLTrainer(cfg, buffer, env=None)
     losses, v_stds, adv_means, adv_stds, grad_norms, step_ms = [], [], [], [], [], []
 
-    t_start = time.perf_counter()
     for step in range(1, n_steps + 1):
         t0 = time.perf_counter()
         metrics = trainer.train_step()
@@ -380,20 +370,14 @@ def _run_trainer_seed(
         grad_norms.append(gn);    step_ms.append(elapsed_ms)
 
         if step % LOG_INTERVAL == 0:
-            elapsed_total = time.perf_counter() - t_start
-            eta_s = elapsed_total / step * (n_steps - step)
             wandb.log({
                 "loss/value": lv, "advantage_mean": adv,
                 "grad_norm": gn, "ms_per_step": elapsed_ms,
             }, step=step)
-            print(f"    [trainer] step {step:>6}/{n_steps}  "
-                  f"loss={lv:.4f}  adv={adv:.3f}  ms={elapsed_ms:.1f}  "
-                  f"ETA={eta_s:.0f}s", end="\r", flush=True)
+            print(f"    step {step}/{n_steps}  "
+                  f"loss={lv:.4f}  adv={adv:.3f}  ms={elapsed_ms:.1f}", end="\r")
 
-    print(flush=True)
-    total_s = time.perf_counter() - t_start
-    print(f"    [trainer] done  total={total_s:.1f}s  "
-          f"final_loss={losses[-1]:.4f}", flush=True)
+    print()
     return {
         "loss": losses, "v_std": v_stds, "adv_mean": adv_means,
         "adv_std": adv_stds, "grad_norm": grad_norms, "ms_per_step": step_ms,
@@ -401,21 +385,18 @@ def _run_trainer_seed(
 
 
 def _run_flex_seed(
-    buffer:       ReplayBuffer,
+    buffer:      ReplayBuffer,
     entanglement: str = BASE_ENTANGLEMENT,
     measurement:  str = BASE_MEASUREMENT,
     n_qubits:     int = BASE_N_QUBITS,
     n_layers:     int = BASE_N_LAYERS,
-    obs_dim:      int = None,    # inferred from buffer if None
+    obs_dim:      int = None,
     seed:         int = 0,
     n_steps:      int = NUM_STEPS,
 ) -> dict:
     """One seed via FlexQuantumValueNetwork (topology / measurement ablations)."""
-    _obs_dim = obs_dim if obs_dim is not None else buffer.obs_dim
-    print(f"    [flex] seed={seed}  entanglement={entanglement}  "
-          f"measurement={measurement}  n_qubits={n_qubits}  "
-          f"n_layers={n_layers}  obs_dim={_obs_dim}", flush=True)
     set_seed(seed)
+    _obs_dim = obs_dim if obs_dim is not None else buffer.obs_dim
     qvn  = FlexQuantumValueNetwork(
         n_qubits=n_qubits, n_layers=n_layers,
         obs_dim=_obs_dim,
@@ -432,7 +413,6 @@ def _run_flex_seed(
     opt_q = optim.Adam(critic.parameters(), lr=BASE_LR_Q)
     losses, v_stds, adv_means, adv_stds, grad_norms, step_ms = [], [], [], [], [], []
 
-    t_start = time.perf_counter()
     for step in range(1, n_steps + 1):
         t0 = time.perf_counter()
         b  = to_device(buffer.sample(BASE_BATCH))
@@ -464,20 +444,14 @@ def _run_flex_seed(
         grad_norms.append(gn);       step_ms.append(ms)
 
         if step % LOG_INTERVAL == 0:
-            elapsed_total = time.perf_counter() - t_start
-            eta_s = elapsed_total / step * (n_steps - step)
             wandb.log({
                 "loss/value": lv.item(), "advantage_mean": adv.mean().item(),
                 "grad_norm": gn, "ms_per_step": ms,
             }, step=step)
-            print(f"    [flex] step {step:>6}/{n_steps}  "
-                  f"loss={lv.item():.4f}  adv={adv.mean().item():.3f}  "
-                  f"ms={ms:.1f}  ETA={eta_s:.0f}s", end="\r", flush=True)
+            print(f"    step {step}/{n_steps}  "
+                  f"loss={lv.item():.4f}  adv={adv.mean().item():.3f}  ms={ms:.1f}", end="\r")
 
-    print(flush=True)
-    total_s = time.perf_counter() - t_start
-    print(f"    [flex] done  total={total_s:.1f}s  "
-          f"final_loss={losses[-1]:.4f}", flush=True)
+    print()
     return {
         "loss": losses, "v_std": v_stds, "adv_mean": adv_means,
         "adv_std": adv_stds, "grad_norm": grad_norms, "ms_per_step": step_ms,
@@ -490,24 +464,23 @@ def _run_classical_seed(
     n_steps: int = NUM_STEPS,
 ) -> dict:
     """Classical MLP V-network baseline (used in datasize ablation)."""
-    print(f"    [classical] seed={seed}  n_steps={n_steps}", flush=True)
     set_seed(seed)
-    net           = ValueNetwork(buffer.obs_dim, hidden_dims=(256, 256)).to(DEVICE)
+    net     = ValueNetwork(buffer.obs_dim, hidden_dims=(256, 256)).to(DEVICE)
     critic        = _make_critic(buffer.obs_dim, buffer.act_dim, seed)
     critic_target = _make_critic(buffer.obs_dim, buffer.act_dim, seed)
     with torch.no_grad():
         for p, pt in zip(critic.parameters(), critic_target.parameters()):
             pt.data.copy_(p.data);  pt.requires_grad_(False)
 
+    # Wrap net so value_loss gets (B,1)
     class _Wrap(nn.Module):
-        def forward(self_, obs): return net(obs)
+        def forward(self_, obs): return net(obs)   # ValueNetwork already returns (B,1)
 
     wrapped = _Wrap()
     opt_v = optim.Adam(net.parameters(), lr=3e-3)
     opt_q = optim.Adam(critic.parameters(), lr=BASE_LR_Q)
     losses, adv_means, step_ms = [], [], []
 
-    t_start = time.perf_counter()
     for step in range(1, n_steps + 1):
         t0 = time.perf_counter()
         b  = to_device(buffer.sample(min(BASE_BATCH, len(buffer))))
@@ -533,54 +506,95 @@ def _run_classical_seed(
         step_ms.append(ms)
 
         if step % LOG_INTERVAL == 0:
-            elapsed_total = time.perf_counter() - t_start
-            eta_s = elapsed_total / step * (n_steps - step)
             wandb.log({"loss/value": lv.item(), "advantage_mean": adv.mean().item()},
                       step=step)
-            print(f"    [classical] step {step:>6}/{n_steps}  "
-                  f"loss={lv.item():.4f}  adv={adv.mean().item():.3f}  "
-                  f"ETA={eta_s:.0f}s", end="\r", flush=True)
 
-    print(flush=True)
-    total_s = time.perf_counter() - t_start
-    print(f"    [classical] done  total={total_s:.1f}s  "
-          f"final_loss={losses[-1]:.4f}", flush=True)
     return {"loss": losses, "adv_mean": adv_means, "ms_per_step": step_ms}
 
 
 # ── Per-ablation runners ──────────────────────────────────────────────────────
 
+# ── Plotting helpers ──────────────────────────────────────────────────────────
+
+def plot_ablation_curves(
+    conditions: Dict[str, List[dict]],
+    title:      str,
+    filename:   str,
+    metrics:    List[Tuple[str, str]] = None,
+    colors:     List[str] = None,
+    n_steps:    int = NUM_STEPS,
+) -> None:
+    if metrics is None:
+        metrics = [
+            ("loss",      "Expectile Loss (τ=0.7)"),
+            ("v_std",     "std(V(s))  [expressibility proxy]"),
+            ("adv_mean",  "mean(A = Q−V)  [actor signal]"),
+            ("grad_norm", "‖∇θ‖₂  [gradient health]"),
+        ]
+    if colors is None:
+        cmap   = plt.cm.tab10
+        colors = [cmap(i / max(len(conditions) - 1, 1)) for i in range(len(conditions))]
+
+    steps = np.arange(1, n_steps + 1)
+    n_m   = len(metrics)
+    fig, axes = plt.subplots(1, n_m, figsize=(4.5 * n_m, 4.5))
+    if n_m == 1:
+        axes = [axes]
+    fig.suptitle(title, fontsize=12, fontweight="bold")
+
+    for col, (metric, ylabel) in enumerate(metrics):
+        ax = axes[col]
+        for (label, seed_results), color in zip(conditions.items(), colors):
+            try:
+                arr = np.array([s[metric] for s in seed_results])
+                mu  = arr.mean(0)
+                ci  = ci95(arr)
+                ax.plot(steps[:len(mu)], mu, color=color, label=label, lw=1.5)
+                ax.fill_between(steps[:len(mu)], mu - ci, mu + ci, color=color, alpha=0.18)
+            except Exception:
+                pass
+        ax.set_title(ylabel, fontsize=10)
+        ax.set_xlabel("Gradient step")
+        if col == 0:
+            ax.set_ylabel("Value")
+        if col == n_m - 1:
+            ax.legend(fontsize=8)
+
+    plt.tight_layout()
+    path = RESULTS_DIR / filename
+    fig.savefig(path, bbox_inches="tight", dpi=130)
+    plt.close(fig)
+    print(f"  [fig] saved → {path}", flush=True)
+
+
 def _wandb_init(offline: bool = False, **kwargs) -> None:
-    """wandb.init wrapper: handles new reinit API and falls back to offline on auth errors."""
+    """wandb.init wrapper: compatible with wandb 0.26.x."""
     mode = "offline" if offline else "online"
-    print(f"    [wandb] init  mode={mode}  name={kwargs.get('name','?')}", flush=True)
+    # wandb 0.26.x does not resolve entity from netrc automatically when passed
+    # explicitly — omit it and let wandb resolve from credentials
+    kwargs.pop("entity", None)
     try:
-        wandb.init(mode=mode, reinit="finish_previous", **kwargs)
-    except TypeError:
         wandb.init(mode=mode, reinit=True, **kwargs)
     except wandb.errors.CommError as e:
-        print(f"  [wandb] online init failed ({e}), switching to offline.", flush=True)
-        wandb.init(mode="offline", reinit="finish_previous", **kwargs)
-    print(f"    [wandb] init OK", flush=True)
+        print(f"  [W&B] online init failed ({e}), switching to offline mode.")
+        wandb.init(mode="offline", reinit=True, **kwargs)
 
 
 def run_condition(
-    condition_key:  str,
-    seed:           int,
-    buffer:         ReplayBuffer,
-    env_cfg:        dict,
-    use_flex:       bool = False,
-    flex_kwargs:    dict = None,
+    condition_key: str,
+    seed:          int,
+    buffer:        ReplayBuffer,
+    env_cfg:       dict,
+    use_flex:      bool = False,
+    flex_kwargs:   dict = None,
     trainer_kwargs: dict = None,
-    n_steps:        int  = NUM_STEPS,
-    wandb_tags:     List[str] = None,
-    wandb_offline:  bool = False,
+    n_steps:       int = NUM_STEPS,
+    wandb_tags:    List[str] = None,
+    wandb_offline: bool = False,
 ) -> dict:
     """Run one condition × seed, with W&B init/finish bracketing the run."""
     run_name = f"{condition_key}__seed{seed}"
     tags     = (wandb_tags or []) + [f"seed={seed}"]
-
-    print(f"\n  [run_condition] {run_name}", flush=True)
 
     _wandb_init(
         project = WANDB_PROJECT,
@@ -621,13 +635,11 @@ def run_condition(
             "mean_adv_last50": mean_adv,
             "mean_ms_per_step": mean_ms,
         })
-        print(f"  [run_condition] {run_name} DONE  "
-              f"final_loss={final_loss:.4f}  mean_adv={mean_adv:.3f}", flush=True)
     finally:
         wandb.finish()
-        print(f"  [wandb] run finished", flush=True)
 
     return result
+
 
 
 # ── Ablation entry points ─────────────────────────────────────────────────────
@@ -635,22 +647,22 @@ def run_condition(
 def ablation_topology(seeds: List[int], env_cfg: dict, n_steps: int,
                       wandb_offline: bool) -> None:
     print("\n" + "=" * 65)
-    print("  ABLATION: Entanglement Topology")
+    print("  ABLATION 2: Entanglement Topology")
     print("=" * 65)
+    # Run on both primary and secondary datasets
     for ds_name, ds_id in [
         (env_cfg["group"], env_cfg["dataset_id"]),
         ("walker2d-medium", _ENV_REGISTRY["walker2d"]["dataset_id"]),
     ]:
-        print(f"\n  [topology] loading dataset: {ds_id}", flush=True)
         buffer = load_minari_dataset(ds_id, device="cpu")
-        print(f"  [topology] dataset loaded  size={len(buffer)}", flush=True)
+        print(f"\n  Dataset: {ds_name}")
         ds_results = {}
         for topo in TOPOLOGY_CONDITIONS:
             cond_key = f"topology={topo}"
-            print(f"\n  === {cond_key} ===", flush=True)
+            print(f"\n  === {cond_key} ===")
             seed_results = []
             for seed in seeds:
-                print(f"  seed={seed}", end="  ", flush=True)
+                print(f"  seed={seed}", end="  ")
                 r = run_condition(
                     f"{cond_key}__{ds_name}", seed, buffer, env_cfg,
                     use_flex=True,
@@ -667,27 +679,69 @@ def ablation_topology(seeds: List[int], env_cfg: dict, n_steps: int,
                 )
                 seed_results.append(r)
                 print(f"loss={r['loss'][-1]:.4f}  "
-                      f"adv={np.mean(r['adv_mean'][-50:]):.3f}", flush=True)
+                      f"adv={np.mean(r['adv_mean'][-50:]):.3f}")
             ds_results[cond_key] = seed_results
         _print_summary(f"TOPOLOGY ({ds_name})", ds_results)
+        # ── curves figure ──
+        topo_colors = {"none": "#aaaaaa", "linear": "#2166ac", "circular": "#f4a582", "all_to_all": "#d6604d"}
+        plot_ablation_curves(
+            ds_results,
+            title=f"Ablation: Entanglement Topology — {ds_name}  ({len(seeds)} seeds)",
+            filename=f"ablation_topology_{ds_name.replace('-','_')}.png",
+            colors=[topo_colors[t] for t in TOPOLOGY_CONDITIONS],
+            n_steps=n_steps,
+        )
+        # ── radar figure ──
+        metric_keys_r   = ["loss", "adv_mean", "v_std", "grad_norm"]
+        metric_labels_r = ["Final Loss\n(lower=better)", "mean Ā\n(higher=better)",
+                           "std(V)\n(higher=more expressive)", "‖∇θ‖\n(higher=less BP)"]
+        def tail_mean_r(results, key, n=50):
+            return np.mean([np.mean(s[key][-n:]) for s in results if key in s])
+        try:
+            fig_r, axes_r = plt.subplots(1, len(TOPOLOGY_CONDITIONS), figsize=(16, 4), subplot_kw={"polar": True})
+            fig_r.suptitle(f"Topology comparison — radar ({ds_name}, normalised per metric)", fontsize=12, fontweight="bold")
+            metric_raw = {}
+            for mk in metric_keys_r:
+                vals = {t: tail_mean_r(ds_results.get(f"topology={t}", [{}]), mk) for t in TOPOLOGY_CONDITIONS}
+                vmin, vmax = min(vals.values()), max(vals.values())
+                rng = vmax - vmin if vmax != vmin else 1.0
+                metric_raw[mk] = {t: (1 - (v-vmin)/rng) if mk=="loss" else (v-vmin)/rng for t,v in vals.items()}
+            N_r = len(metric_keys_r)
+            angles = [n / float(N_r) * 2 * math.pi for n in range(N_r)] + [0]
+            topo_colors_r = {"none": "#aaaaaa", "linear": "#2166ac", "circular": "#f4a582", "all_to_all": "#d6604d"}
+            for ax_r, topo in zip(axes_r, TOPOLOGY_CONDITIONS):
+                vals_r = [metric_raw[mk][topo] for mk in metric_keys_r] + [metric_raw[metric_keys_r[0]][topo]]
+                ax_r.plot(angles, vals_r, color=topo_colors_r[topo], lw=2)
+                ax_r.fill(angles, vals_r, color=topo_colors_r[topo], alpha=0.25)
+                ax_r.set_xticks(angles[:-1])
+                ax_r.set_xticklabels(metric_labels_r, size=8)
+                ax_r.set_yticks([0.25, 0.5, 0.75, 1.0])
+                ax_r.set_yticklabels(["", "", "", ""], size=7)
+                ax_r.set_title(topo, size=11, fontweight="bold", pad=14, color=topo_colors_r[topo])
+                ax_r.set_ylim(0, 1)
+            plt.tight_layout()
+            path_r = RESULTS_DIR / f"ablation_topology_radar_{ds_name.replace('-','_')}.png"
+            fig_r.savefig(path_r, bbox_inches="tight", dpi=130)
+            plt.close(fig_r)
+            print(f"  [fig] saved → {path_r}", flush=True)
+        except Exception as e:
+            print(f"  [fig] radar failed: {e}", flush=True)
 
 
 def ablation_measurement(seeds: List[int], env_cfg: dict, n_steps: int,
                          wandb_offline: bool) -> None:
     print("\n" + "=" * 65)
-    print("  ABLATION: Measurement Scheme")
+    print("  ABLATION 4: Measurement Scheme")
     print("=" * 65)
-    print(f"  [measurement] loading dataset: {env_cfg['dataset_id']}", flush=True)
     buffer = load_minari_dataset(env_cfg["dataset_id"], device="cpu")
-    print(f"  [measurement] dataset loaded  size={len(buffer)}", flush=True)
     all_results = {}
 
     for scheme in MEASUREMENT_CONDITIONS:
         cond_key = f"meas={scheme}"
-        print(f"\n  === {cond_key} ===", flush=True)
+        print(f"\n  === {cond_key} ===")
         seed_results = []
         for seed in seeds:
-            print(f"  seed={seed}", end="  ", flush=True)
+            print(f"  seed={seed}", end="  ")
             r = run_condition(
                 cond_key, seed, buffer, env_cfg,
                 use_flex=True,
@@ -704,29 +758,33 @@ def ablation_measurement(seeds: List[int], env_cfg: dict, n_steps: int,
             )
             seed_results.append(r)
             print(f"loss={r['loss'][-1]:.4f}  "
-                  f"adv={np.mean(r['adv_mean'][-50:]):.3f}", flush=True)
+                  f"adv={np.mean(r['adv_mean'][-50:]):.3f}")
         all_results[cond_key] = seed_results
 
     _print_summary("MEASUREMENT", all_results)
+    plot_ablation_curves(
+        all_results,
+        title=f"Ablation: Measurement Scheme  ({len(seeds)} seeds)",
+        filename="ablation_measurement_curves.png",
+        n_steps=n_steps,
+    )
 
 
 def ablation_datasize(seeds: List[int], env_cfg: dict, n_steps: int,
                       wandb_offline: bool) -> None:
     print("\n" + "=" * 65)
-    print("  ABLATION: Dataset Size Sensitivity")
+    print("  ABLATION 5: Dataset Size Sensitivity")
     print("=" * 65)
-    print(f"  [datasize] loading full dataset: {env_cfg['dataset_id']}", flush=True)
     buf_full = load_minari_dataset(env_cfg["dataset_id"], device="cpu")
-    print(f"  [datasize] full dataset size={len(buf_full)}", flush=True)
 
     for frac in DATA_FRACTIONS:
         frac_key = f"data={int(frac*100)}%"
         sub_buf  = _subsample_buffer(buf_full, frac)
-        print(f"\n  [{frac_key}]  {len(sub_buf):,} transitions", flush=True)
+        print(f"\n  [{frac_key}]  {len(sub_buf):,} transitions")
 
         # Quantum
         for seed in seeds:
-            print(f"  [datasize] quantum seed={seed}", end="  ", flush=True)
+            print(f"  quantum seed={seed}", end="  ")
             _wandb_init(
                 project=WANDB_PROJECT,
                 name=f"quantum__{frac_key}__seed{seed}",
@@ -746,13 +804,14 @@ def ablation_datasize(seeds: List[int], env_cfg: dict, n_steps: int,
                 cfg.wandb_run_name = f"quantum__{frac_key}__seed{seed}"
                 r = _run_trainer_seed(sub_buf, cfg, n_steps=n_steps, seed=seed)
                 print(f"loss={r['loss'][-1]:.4f}  "
-                      f"adv={np.mean(r['adv_mean'][-50:]):.3f}", flush=True)
+                      f"adv={np.mean(r['adv_mean'][-50:]):.3f}")
             finally:
                 wandb.finish()
 
+        # ── per-fraction curves already logged to W&B; collect for final figure ──
         # Classical baseline
         for seed in seeds:
-            print(f"  [datasize] classical seed={seed}", end="  ", flush=True)
+            print(f"  classical seed={seed}", end="  ")
             _wandb_init(
                 project=WANDB_PROJECT,
                 name=f"classical__{frac_key}__seed{seed}",
@@ -765,18 +824,77 @@ def ablation_datasize(seeds: List[int], env_cfg: dict, n_steps: int,
             try:
                 r = _run_classical_seed(sub_buf, seed=seed, n_steps=n_steps)
                 print(f"loss={r['loss'][-1]:.4f}  "
-                      f"adv={np.mean(r['adv_mean'][-50:]):.3f}", flush=True)
+                      f"adv={np.mean(r['adv_mean'][-50:]):.3f}")
             finally:
                 wandb.finish()
 
 
+
+
+    _plot_datasize(ds_q_results, ds_c_results, n_steps)
+
+
+def _plot_datasize(datasize_q: dict, datasize_c: dict, n_steps: int) -> None:
+    """datasize_q/c: {frac_key: [seed_result_dicts]}"""
+    fracs = list(datasize_q.keys())
+    if not fracs:
+        return
+    steps_ds   = np.arange(1, n_steps + 1)
+    cmap_ds    = plt.cm.viridis
+    frac_colors = {f: cmap_ds(i / max(len(fracs)-1, 1)) for i, f in enumerate(fracs)}
+
+    # Learning curves
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
+    fig.suptitle(f"Dataset Size Sensitivity — Quantum vs Classical  ({len(next(iter(datasize_q.values())))} seeds)",
+                 fontsize=12, fontweight="bold")
+    for col, (net_label, ds_dict, ls) in enumerate([("quantum", datasize_q, "-"), ("classical", datasize_c, "--")]):
+        ax = axes[col]
+        for frac_key in fracs:
+            try:
+                arr = np.array([s["loss"] for s in ds_dict[frac_key]])
+                mu, ci = arr.mean(0), ci95(arr)
+                ax.plot(steps_ds[:len(mu)], mu, color=frac_colors[frac_key], label=frac_key, lw=1.5, ls=ls)
+                ax.fill_between(steps_ds[:len(mu)], mu-ci, mu+ci, color=frac_colors[frac_key], alpha=0.15)
+            except Exception:
+                pass
+        ax.set_title(f"{net_label.capitalize()} V-network", fontsize=11)
+        ax.set_xlabel("Step"); ax.set_ylabel("Expectile loss")
+        ax.legend(title="Data fraction", fontsize=8)
+    plt.tight_layout()
+    p = RESULTS_DIR / "ablation_datasize_curves.png"
+    fig.savefig(p, bbox_inches="tight", dpi=130); plt.close(fig)
+    print(f"  [fig] saved → {p}", flush=True)
+
+    # Advantage bar chart
+    fig2, ax2 = plt.subplots(figsize=(8, 4.5))
+    x = np.arange(len(fracs)); w = 0.35
+    q_adv = [np.mean([np.mean(s["adv_mean"][-50:]) for s in datasize_q[f]]) for f in fracs]
+    c_adv = [np.mean([np.mean(s["adv_mean"][-50:]) for s in datasize_c[f]]) for f in fracs]
+    ax2.bar(x - w/2, q_adv, width=w, label="Quantum V",   color="#2166ac", edgecolor="white")
+    ax2.bar(x + w/2, c_adv, width=w, label="Classical V", color="#d6604d", edgecolor="white")
+    ax2.axhline(0, color="black", lw=0.8, ls="--")
+    ax2.set_xticks(x); ax2.set_xticklabels(fracs)
+    ax2.set_xlabel("Dataset size fraction"); ax2.set_ylabel("mean(A = Q−V)  [last 50 steps]")
+    ax2.set_title("Advantage signal vs dataset size")
+    ax2.legend()
+    plt.tight_layout()
+    p2 = RESULTS_DIR / "ablation_datasize_advantage.png"
+    fig2.savefig(p2, bbox_inches="tight", dpi=130); plt.close(fig2)
+    print(f"  [fig] saved → {p2}", flush=True)
+
+
 def _subsample_buffer(buf: ReplayBuffer, fraction: float,
                       seed: int = 42) -> ReplayBuffer:
+    """Return a new ReplayBuffer containing `fraction` of transitions.
+
+    Internal storage uses numpy arrays (_observations, _actions, etc.)
+    pre-allocated at capacity. We build a new buffer at the subsampled
+    capacity and copy the selected rows directly into the numpy arrays.
+    """
     import random
     rng     = random.Random(seed)
     n_total = len(buf)
     n_keep  = max(1, int(n_total * fraction))
-    print(f"  [subsample] fraction={fraction}  keeping {n_keep}/{n_total}", flush=True)
     idx     = np.array(sorted(rng.sample(range(n_total), n_keep)), dtype=np.intp)
 
     new = ReplayBuffer(
@@ -790,7 +908,7 @@ def _subsample_buffer(buf: ReplayBuffer, fraction: float,
     new._rewards[:]           = buf._rewards[idx]
     new._next_observations[:] = buf._next_observations[idx]
     new._dones[:]             = buf._dones[idx]
-    new._ptr  = 0
+    new._ptr  = 0       # treat as read-only; ptr irrelevant
     new._size = n_keep
     return new
 
@@ -805,15 +923,13 @@ def analysis_fourier(env_cfg: dict, n_steps: int) -> None:
     N_POINTS   = 256
     FEATURE    = 0
     SNAPSHOTS  = [0, n_steps // 4, n_steps // 2, n_steps]
-    print(f"  [fourier] loading dataset: {env_cfg['dataset_id']}", flush=True)
     buffer     = load_minari_dataset(env_cfg["dataset_id"], device="cpu")
-    print(f"  [fourier] dataset loaded  size={len(buffer)}", flush=True)
 
     for label, (n_qubits, n_layers) in [
         ("base(4q-2L)", (4, 2)),
-        ("deep(4q-3L-needs8q)", (8, 3)),
+        ("deep(4q-3L-needs8q)", (8, 3)),   # n_layers=3 requires n_qubits=8
     ]:
-        print(f"\n  [fourier] config: {label}", flush=True)
+        print(f"\n  Config: {label}")
         qvn     = FlexQuantumValueNetwork(
             n_qubits=n_qubits, n_layers=n_layers,
             obs_dim=buffer.obs_dim).to(DEVICE)
@@ -829,7 +945,6 @@ def analysis_fourier(env_cfg: dict, n_steps: int) -> None:
 
         if 0 in SNAPSHOTS:
             snapshots[0] = _fourier_snapshot(qvn, buffer.obs_dim, N_POINTS, FEATURE)
-            print(f"  [fourier] snapshot at step=0 OK", flush=True)
 
         for step in range(1, n_steps + 1):
             b = to_device(buffer.sample(BASE_BATCH))
@@ -839,27 +954,46 @@ def analysis_fourier(env_cfg: dict, n_steps: int) -> None:
             with torch.no_grad():
                 for p, pt in zip(critic.parameters(), critic_target.parameters()):
                     pt.data.mul_(1 - BASE_POLYAK).add_(p.data, alpha=BASE_POLYAK)
-
             opt_v.zero_grad()
             value_loss(wrapped, critic_target, b, BASE_TAU).backward()
             opt_v.step()
-
             if step in SNAPSHOTS:
                 snapshots[step] = _fourier_snapshot(qvn, buffer.obs_dim, N_POINTS, FEATURE)
                 freqs, mags = snapshots[step]
                 dom = freqs[np.argmax(mags)]
-                print(f"  [fourier] step {step:>6}  dominant_freq={dom:.1f}  "
-                      f"max_mag={mags.max():.4f}", flush=True)
+                print(f"    step {step:>6}  dominant_freq={dom:.1f}  "
+                      f"max_mag={mags.max():.4f}")
 
-            if step % LOG_INTERVAL == 0:
-                print(f"  [fourier] training step {step}/{n_steps}", end="\r", flush=True)
-
-        print(flush=True)
         out_path = RESULTS_DIR / f"fourier_{label.replace('(','').replace(')','').replace('-','_')}.npz"
         np.savez(out_path, **{
             f"step_{s}": np.stack(v) for s, v in snapshots.items()
         })
-        print(f"  [fourier] saved → {out_path}", flush=True)
+        print(f"  Saved → {out_path}")
+        # ── spectrum figure ──
+        try:
+            sorted_snaps = sorted(snapshots.items())
+            fig_f, axes_f = plt.subplots(1, len(sorted_snaps), figsize=(14, 4))
+            if len(sorted_snaps) == 1:
+                axes_f = [axes_f]
+            fig_f.suptitle(f"Fourier Spectrum of V(s) — {label}\nFeature 0 sweep; seed 0",
+                           fontsize=12, fontweight="bold")
+            cmap_f = plt.cm.plasma
+            for ax_f, (step_f, (freqs_f, mags_f)) in zip(axes_f, sorted_snaps):
+                color_f = cmap_f(step_f / max(sorted_snaps[-1][0], 1))
+                n_show = max(len(freqs_f) // 8, 1)
+                ax_f.bar(freqs_f[:n_show], mags_f[:n_show], width=0.4, color=color_f, edgecolor="none")
+                ax_f.set_title(f"Step {step_f:,}", fontsize=10)
+                ax_f.set_xlabel("Frequency")
+                if ax_f is axes_f[0]:
+                    ax_f.set_ylabel("|FFT(V)|")
+            plt.tight_layout()
+            safe_label = label.replace("(","").replace(")","").replace("-","_")
+            path_f = RESULTS_DIR / f"fourier_spectrum_{safe_label}.png"
+            fig_f.savefig(path_f, bbox_inches="tight", dpi=130)
+            plt.close(fig_f)
+            print(f"  [fig] saved → {path_f}", flush=True)
+        except Exception as e_f:
+            print(f"  [fig] fourier plot failed: {e_f}", flush=True)
 
 
 def _fourier_snapshot(
@@ -877,6 +1011,8 @@ def _fourier_snapshot(
     return freqs, mags
 
 
+
+
 # ── Analysis: Expressibility ──────────────────────────────────────────────────
 
 def analysis_expr(env_cfg: dict) -> None:
@@ -888,28 +1024,48 @@ def analysis_expr(env_cfg: dict) -> None:
     N_BINS    = 75
 
     configs = {
-        "2q-1L-linear":   dict(n_qubits=2, n_layers=1, entanglement="linear"),
-        "4q-1L-linear":   dict(n_qubits=4, n_layers=1, entanglement="linear"),
-        "4q-2L-linear":   dict(n_qubits=4, n_layers=2, entanglement="linear"),   # base
+        "2q-1L-linear":  dict(n_qubits=2, n_layers=1, entanglement="linear"),
+        "4q-1L-linear":  dict(n_qubits=4, n_layers=1, entanglement="linear"),
+        "4q-2L-linear":  dict(n_qubits=4, n_layers=2, entanglement="linear"),   # base
         "4q-2L-circular": dict(n_qubits=4, n_layers=2, entanglement="circular"),
-        "4q-2L-all2all":  dict(n_qubits=4, n_layers=2, entanglement="all_to_all"),
-        "8q-2L-linear":   dict(n_qubits=8, n_layers=2, entanglement="linear"),
-        "8q-3L-linear":   dict(n_qubits=8, n_layers=3, entanglement="linear"),
+        "4q-2L-all2all": dict(n_qubits=4, n_layers=2, entanglement="all_to_all"),
+        "8q-2L-linear":  dict(n_qubits=8, n_layers=2, entanglement="linear"),
+        "8q-3L-linear":  dict(n_qubits=8, n_layers=3, entanglement="linear"),
     }
 
     results = {}
     for cfg_label, kwargs in configs.items():
-        print(f"  [expr] computing KL for {cfg_label}...", flush=True)
         kl = _expressibility_kl(seed=0, n_samples=N_SAMPLES, n_bins=N_BINS, **kwargs)
         results[cfg_label] = kl
         marker = " ← base" if cfg_label == "4q-2L-linear" else ""
-        print(f"  {cfg_label:<22}  KL = {kl:.4f}{marker}", flush=True)
+        print(f"  {cfg_label:<22}  KL = {kl:.4f}{marker}")
 
     out_path = RESULTS_DIR / "expressibility.json"
     import json
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
-    print(f"\n  [expr] saved → {out_path}", flush=True)
+    print(f"\n  Saved → {out_path}")
+    # ── bar chart figure ──
+    try:
+        fig_e, ax_e = plt.subplots(figsize=(11, 4.5))
+        labels_e = list(results.keys())
+        kls_e    = list(results.values())
+        colors_e = ["#2166ac" if "4q-2L-linear" in l else "#aaaaaa" for l in labels_e]
+        colors_e = ["#d01c8b" if "all2all" in l else c for l, c in zip(labels_e, colors_e)]
+        bars_e = ax_e.bar(labels_e, kls_e, color=colors_e, edgecolor="white")
+        ax_e.set_xticklabels(labels_e, rotation=35, ha="right", fontsize=9)
+        ax_e.set_ylabel("KL(circuit || Haar)  [lower = more expressive]")
+        ax_e.set_title("Expressibility across circuit configurations\n(base config in blue)", fontsize=11)
+        for bar_e, v_e in zip(bars_e, kls_e):
+            ax_e.text(bar_e.get_x() + bar_e.get_width()/2, bar_e.get_height() + 0.001,
+                      f"{v_e:.3f}", ha="center", va="bottom", fontsize=8)
+        plt.tight_layout()
+        path_e = RESULTS_DIR / "expressibility.png"
+        fig_e.savefig(path_e, bbox_inches="tight", dpi=130)
+        plt.close(fig_e)
+        print(f"  [fig] saved → {path_e}", flush=True)
+    except Exception as e_fig:
+        print(f"  [fig] expressibility plot failed: {e_fig}", flush=True)
 
 
 def _expressibility_kl(
@@ -935,9 +1091,7 @@ def _expressibility_kl(
         return qml.state()
 
     fidelities = []
-    for i in range(n_samples):
-        if i % 50 == 0:
-            print(f"    [expr] sample {i}/{n_samples}", end="\r", flush=True)
+    for _ in range(n_samples):
         t1 = np.random.uniform(0, 2 * np.pi, (n_layers, n_qubits, 3))
         w1 = np.random.uniform(0, 2 * np.pi, (n_layers, n_qubits, 3))
         t2 = np.random.uniform(0, 2 * np.pi, (n_layers, n_qubits, 3))
@@ -946,14 +1100,13 @@ def _expressibility_kl(
         s1 = _state(t1, w1, xs)
         s2 = _state(t2, w2, xs)
         fidelities.append(float(abs(np.dot(s1.conj(), s2)) ** 2))
-    print(flush=True)
 
-    bins      = np.linspace(0, 1, n_bins + 1)
-    f_mid     = (bins[:-1] + bins[1:]) / 2
+    bins     = np.linspace(0, 1, n_bins + 1)
+    f_mid    = (bins[:-1] + bins[1:]) / 2
     hist_c, _ = np.histogram(fidelities, bins=bins, density=True)
-    p_haar    = (dim - 1) * (1 - f_mid) ** (dim - 2)
-    p_haar   /= p_haar.sum()
-    p_circ    = hist_c / (hist_c.sum() + 1e-12)
+    p_haar   = (dim - 1) * (1 - f_mid) ** (dim - 2)
+    p_haar  /= p_haar.sum()
+    p_circ   = hist_c / (hist_c.sum() + 1e-12)
     return float(np.sum(
         np.where(p_circ > 0, p_circ * np.log(p_circ / (p_haar + 1e-12)), 0)
     ))
@@ -1028,26 +1181,21 @@ def main() -> None:
         return
 
     failed: List[tuple] = []
-
-    # FIX: added 'fourier' and 'expr' which were missing from the dispatcher
     dispatcher = {
         "topology":    lambda: ablation_topology(args.seeds, env_cfg, args.steps, args.wandb_offline),
         "measurement": lambda: ablation_measurement(args.seeds, env_cfg, args.steps, args.wandb_offline),
         "datasize":    lambda: ablation_datasize(args.seeds, env_cfg, args.steps, args.wandb_offline),
-        "fourier":     lambda: analysis_fourier(env_cfg, args.steps),   # FIX: was missing
-        "expr":        lambda: analysis_expr(env_cfg),                   # FIX: was missing
+        "fourier":     lambda: analysis_fourier(env_cfg, args.steps),
+        "expr":        lambda: analysis_expr(env_cfg),
     }
 
     for ablation_name in args.ablation:
-        print(f"\n[RUN] {ablation_name}", flush=True)
-        t0 = time.perf_counter()
+        print(f"\n[RUN] {ablation_name}")
         try:
             dispatcher[ablation_name]()
-            elapsed = time.perf_counter() - t0
-            print(f"[RUN] {ablation_name} finished in {elapsed:.1f}s", flush=True)
         except Exception as exc:
             import traceback
-            print(f"  ERROR in {ablation_name}: {exc}", flush=True)
+            print(f"  ERROR in {ablation_name}: {exc}")
             traceback.print_exc()
             failed.append((ablation_name, str(exc)))
             try:
