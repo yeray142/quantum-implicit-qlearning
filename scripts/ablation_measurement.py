@@ -308,27 +308,33 @@ class FlexQuantumValueNetwork(nn.Module):
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         if self.training:
             self._update_running_stats(obs.detach())
-        xs = self._encode(obs).requires_grad_(True)   # (B, n_qubits)
+        orig_device = obs.device
+        # adjoint diff method always returns CPU tensors — move everything to CPU for circuit
+        xs = self._encode(obs.cpu()).requires_grad_(True)
+        theta_cpu = self.theta.cpu()
+        w_cpu     = self.w.cpu()
 
         if self._scalar_meas:
             out = torch.stack([
-                self._circuit(self.theta, self.w, xs[i]).to(torch.float32)
+                self._circuit(theta_cpu, w_cpu, xs[i]).to(torch.float32)
                 for i in range(xs.shape[0])
             ])
         elif self.measurement == "mean_pauli_z":
             out = torch.stack([
                 torch.stack([r.to(torch.float32)
-                             for r in self._circuit(self.theta, self.w, xs[i])]).mean()
+                             for r in self._circuit(theta_cpu, w_cpu, xs[i])]).mean()
                 for i in range(xs.shape[0])
             ])
         else:   # learned
-            w_norm = torch.softmax(self.meas_weights, dim=0)
+            w_norm = torch.softmax(self.meas_weights.cpu(), dim=0)
             out = torch.stack([
                 (torch.stack([r.to(torch.float32)
-                              for r in self._circuit(self.theta, self.w, xs[i])]) * w_norm).sum()
+                              for r in self._circuit(theta_cpu, w_cpu, xs[i])]) * w_norm).sum()
                 for i in range(xs.shape[0])
             ])
 
+        # move back to original device for loss computation
+        out = out.to(orig_device)
         return out * self.out_scale + self.out_bias
 
 
