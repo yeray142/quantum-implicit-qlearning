@@ -730,14 +730,10 @@ def ablation_datasize(seeds: List[int], env_cfg: dict, n_steps: int,
                 offline=wandb_offline,
             )
             try:
-                cfg = _build_trainer_config(
-                    seed=seed, n_steps=n_steps,
-                    dataset_id=env_cfg["dataset_id"],
-                    env_id=env_cfg["env_id"],
-                    tau=env_cfg["tau"],
+                r = _run_flex_seed(
+                    sub_buf, seed=seed, n_steps=n_steps,
+                    obs_dim=sub_buf.obs_dim,
                 )
-                cfg.wandb_run_name = f"quantum__{frac_key}__seed{seed}"
-                r = _run_trainer_seed(sub_buf, cfg, n_steps=n_steps, seed=seed)
                 print(f"loss={r['loss'][-1]:.4f}  "
                       f"adv={np.mean(r['adv_mean'][-50:]):.3f}")
             finally:

@@ -329,14 +329,16 @@ def _run_flex_seed(
     measurement:  str = BASE_MEASUREMENT,
     n_qubits:     int = BASE_N_QUBITS,
     n_layers:     int = BASE_N_LAYERS,
+    obs_dim:      int = None,
     seed:         int = 0,
     n_steps:      int = NUM_STEPS,
 ) -> dict:
     """One seed via QuantumValueNetwork (topology / measurement ablations)."""
     set_seed(seed)
+    _obs_dim = obs_dim if obs_dim is not None else buffer.obs_dim
     qvn  = QuantumValueNetwork(
         n_qubits=n_qubits, n_layers=n_layers,
-        obs_dim=buffer.obs_dim,
+        obs_dim=_obs_dim,
         entanglement=entanglement, measurement=measurement,
     ).to(DEVICE)
     wrapped       = _FlexWrap(qvn)
@@ -539,8 +541,12 @@ def ablation_qubit_layer(seeds: List[int], env_cfg: dict, n_steps: int,
             print(f"  seed={seed}", end="  ")
             r = run_condition(
                 cond_key, seed, buffer, env_cfg,
-                use_flex=False,
-                trainer_kwargs=dict(n_qubits=n_qubits, n_layers=n_layers),
+                use_flex=True,
+                flex_kwargs=dict(
+                    n_qubits=n_qubits,
+                    n_layers=n_layers,
+                    obs_dim=buffer.obs_dim,
+                ),
                 n_steps=n_steps,
                 wandb_tags=["ablation:qubit_layer"],
                 wandb_offline=wandb_offline,
