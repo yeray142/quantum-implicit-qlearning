@@ -98,17 +98,9 @@ BASE_GAMMA        = 0.99
 BASE_BATCH        = 256
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# Use lightning.gpu if available (10-100x faster on B200), fall back to default.qubit
-try:
-    import pennylane as _qml_test
-    _dev_test = _qml_test.device("lightning.gpu", wires=1)
-    QUANTUM_DEVICE      = "lightning.gpu"
-    QUANTUM_DIFF_METHOD = "adjoint"
-    print("[DEVICE] lightning.gpu available — using GPU-accelerated simulation")
-except Exception:
-    QUANTUM_DEVICE      = "default.qubit"
-    QUANTUM_DIFF_METHOD = "adjoint"
-    print("[DEVICE] lightning.gpu not available — falling back to default.qubit on CPU")
+QUANTUM_DEVICE      = "default.qubit"
+QUANTUM_DIFF_METHOD = "backprop" if torch.cuda.is_available() else "adjoint"
+print(f"[DEVICE] {QUANTUM_DEVICE}  diff={QUANTUM_DIFF_METHOD}  cuda={torch.cuda.is_available()}")
 
 RESULTS_DIR = Path("results/ablation_qubit_layer_fast")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
