@@ -111,7 +111,7 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── Ablation axis definitions ─────────────────────────────────────────────────
 # Each entry: condition_key -> dict of kwargs forwarded to _build_trainer_config
-# or to FlexQuantumValueNetwork.
+# or to QuantumValueNetwork.
 
 LAYERS_CONDITIONS = {
     "n_layers=1(q=4)": dict(n_qubits=4, n_layers=1),
@@ -200,158 +200,88 @@ def _build_trainer_config(
     )
 
 
-# ── FlexQuantumValueNetwork (topology + measurement ablations) ────────────────
+# ── QuantumValueNetwork (parameter broadcasting, no vmap) ─────────────────────
 
-def _apply_entanglement(n_qubits: int, topology: str) -> None:
-    if topology == "none":
-        return
-    elif topology == "linear":
-        for q in range(n_qubits - 1):
-            qml.CZ(wires=[q, q + 1])
-    elif topology == "circular":
-        for q in range(n_qubits - 1):
-            qml.CZ(wires=[q, q + 1])
-        if n_qubits > 2:
-            qml.CZ(wires=[n_qubits - 1, 0])
-    elif topology == "all_to_all":
-        for q1, q2 in itertools.combinations(range(n_qubits), 2):
-            qml.CZ(wires=[q1, q2])
-    else:
-        raise ValueError(f"Unknown topology: {topology!r}")
+def _arctan_encode(s, mu, sigma):
+    return torch.arctan((s - mu) / (sigma + 1e-8))
+
+def _cz_preamble(n_qubits):
+    for q in range(0, n_qubits - 1, 2):
+        qml.CZ(wires=[q, q + 1])
+    for q in range(1, n_qubits - 1, 2):
+        qml.CZ(wires=[q, q + 1])
+
+def _cz_entangler(n_qubits):
+    for q in range(n_qubits - 1):
+        qml.CZ(wires=[q, q + 1])
+
+def _build_qnode(n_qubits, n_layers, device_name, diff_method):
+    dev = qml.device(device_name, wires=n_qubits)
+    @qml.qnode(dev, interface="torch", diff_method=diff_method)
+    def circuit(theta, w, xs, active_layers):
+        _cz_preamble(n_qubits)
+        for layer_idx in range(active_layers):
+            th = theta[layer_idx]
+            ww = w[layer_idx]
+            for q in range(n_qubits):
+                angles = th[q] + ww[q] * xs[:, q % xs.shape[1]].unsqueeze(-1)
+                qml.Rot(angles[:, 0], angles[:, 1], angles[:, 2], wires=q)
+            _cz_entangler(n_qubits)
+        return qml.expval(qml.PauliZ(0))
+    return circuit
 
 
-class FlexQuantumValueNetwork(nn.Module):
-    """Flexible QVN for topology and measurement ablations.
+class QuantumValueNetwork(nn.Module):
+    """Quantum V(s) using PennyLane parameter broadcasting — entire batch in one QNode call."""
 
-    Uses torch.vmap for batched circuit evaluation — no per-sample loop.
-    Identity-block init (w = -theta) as per training_dynamics_final.ipynb.
-    """
-
-    def __init__(
-        self,
-        n_qubits:     int = BASE_N_QUBITS,
-        n_layers:     int = BASE_N_LAYERS,
-        obs_dim:      int = 11,
-        entanglement: str = BASE_ENTANGLEMENT,
-        measurement:  str = BASE_MEASUREMENT,
-        device_name:  str = QUANTUM_DEVICE,
-        diff_method:  str = QUANTUM_DIFF_METHOD,
-    ) -> None:
+    def __init__(self, n_qubits=BASE_N_QUBITS, n_layers=BASE_N_LAYERS, obs_dim=11,
+                 device_name=QUANTUM_DEVICE, diff_method=QUANTUM_DIFF_METHOD,
+                 entanglement=None, measurement=None):
         super().__init__()
-        self.n_qubits     = n_qubits
-        self.n_layers     = n_layers
-        self.obs_dim      = obs_dim
-        self.entanglement = entanglement
-        self.measurement  = measurement
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.obs_dim  = obs_dim
+        self._diff_method = diff_method
+        self._active_layers = n_layers
 
-        self.register_buffer("obs_mean",  torch.zeros(obs_dim))
-        self.register_buffer("obs_std",   torch.ones(obs_dim))
-        self.register_buffer("obs_count", torch.tensor(0.0))
+        theta_init = torch.empty(n_layers, n_qubits, 3).uniform_(0, 2 * math.pi)
+        self.theta = nn.Parameter(theta_init)
+        self.w     = nn.Parameter(-theta_init.clone())
 
-        self.theta = nn.Parameter(
-            torch.zeros(n_layers, n_qubits, 3, dtype=torch.float32))
-        self.w = nn.Parameter(
-            torch.zeros(n_layers, n_qubits, 3, dtype=torch.float32))
-        with torch.no_grad():
-            nn.init.uniform_(self.theta, 0, 2 * math.pi)
-            self.w.copy_(-self.theta)   # identity-block init
+        self.a = nn.Parameter(torch.ones(1))
+        self.b = nn.Parameter(torch.zeros(1))
 
-        self.out_scale = nn.Parameter(torch.ones(1))
-        self.out_bias  = nn.Parameter(torch.zeros(1))
+        self.register_buffer("mu",    torch.zeros(obs_dim))
+        self.register_buffer("sigma", torch.ones(obs_dim))
 
-        if measurement == "learned":
-            self.meas_weights = nn.Parameter(torch.ones(n_qubits) / n_qubits)
-        else:
-            self.meas_weights = None
+        self._circuit = _build_qnode(n_qubits, n_layers, device_name, diff_method)
 
-        dev = qml.device(device_name, wires=n_qubits)
-        scalar_meas = measurement in ("pauli_z0", "zz_tensor")
-
-        if scalar_meas:
-            @qml.qnode(dev, interface="torch", diff_method=diff_method)
-            def _circuit(theta, w, xs):
-                _apply_entanglement(n_qubits, entanglement)
-                for layer in range(n_layers):
-                    for q in range(n_qubits):
-                        angles = theta[layer, q] + w[layer, q] * xs[q]
-                        qml.Rot(angles[0], angles[1], angles[2], wires=q)
-                    _apply_entanglement(n_qubits, entanglement)
-                if measurement == "pauli_z0":
-                    return qml.expval(qml.PauliZ(0))
-                else:   # zz_tensor
-                    return qml.expval(qml.PauliZ(0) @ qml.PauliZ(1))
-        else:
-            @qml.qnode(dev, interface="torch", diff_method=diff_method)
-            def _circuit(theta, w, xs):
-                _apply_entanglement(n_qubits, entanglement)
-                for layer in range(n_layers):
-                    for q in range(n_qubits):
-                        angles = theta[layer, q] + w[layer, q] * xs[q]
-                        qml.Rot(angles[0], angles[1], angles[2], wires=q)
-                    _apply_entanglement(n_qubits, entanglement)
-                return [qml.expval(qml.PauliZ(q)) for q in range(n_qubits)]
-
-        self._circuit      = _circuit
-        self._scalar_meas  = scalar_meas
-
-    @torch.no_grad()
-    def _update_running_stats(self, obs: torch.Tensor) -> None:
-        n = obs.shape[0]
-        self.obs_count += n
-        delta = obs.mean(0) - self.obs_mean
-        self.obs_mean += delta * n / self.obs_count
-        self.obs_std = (
-            self.obs_std ** 2 + delta ** 2 * n / self.obs_count
-        ).sqrt().clamp(min=1e-6)
-
-    def _encode(self, obs: torch.Tensor) -> torch.Tensor:
-        xs = torch.arctan((obs - self.obs_mean.to(obs.device)) / (self.obs_std.to(obs.device) + 1e-8))
-        if xs.shape[1] > self.n_qubits:
+    def forward(self, s):
+        _device = s.device
+        xs = _arctan_encode(s, self.mu.to(s.device), self.sigma.to(s.device))
+        B = xs.shape[0]
+        if self.obs_dim < self.n_qubits:
+            pad = torch.zeros(B, self.n_qubits - self.obs_dim, device=xs.device, dtype=xs.dtype)
+            xs = torch.cat([xs, pad], dim=-1)
+        elif self.obs_dim > self.n_qubits:
             xs = xs[:, :self.n_qubits]
-        elif xs.shape[1] < self.n_qubits:
-            pad = torch.zeros(xs.shape[0], self.n_qubits - xs.shape[1],
-                              device=obs.device)
-            xs = torch.cat([xs, pad], dim=1)
-        return xs
-
-    def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        if self.training:
-            self._update_running_stats(obs.detach())
-        orig_device = obs.device
-        xs = self._encode(obs).requires_grad_(True)
-
-        if self._scalar_meas:
-            out = torch.stack([
-                self._circuit(self.theta, self.w, xs[i]).to(torch.float32)
-                for i in range(xs.shape[0])
-            ])
-        elif self.measurement == "mean_pauli_z":
-            out = torch.stack([
-                torch.stack([r.to(torch.float32)
-                             for r in self._circuit(self.theta, self.w, xs[i])]).mean()
-                for i in range(xs.shape[0])
-            ])
-        else:   # learned
-            w_norm = torch.softmax(self.meas_weights, dim=0)
-            out = torch.stack([
-                (torch.stack([r.to(torch.float32)
-                              for r in self._circuit(self.theta, self.w, xs[i])]) * w_norm).sum()
-                for i in range(xs.shape[0])
-            ])
-
-        out = out.to(orig_device)
-        return out * self.out_scale + self.out_bias
+        if self._diff_method == "backprop":
+            expvals = self._circuit(self.theta, self.w, xs, self._active_layers)
+        else:
+            expvals = self._circuit(
+                self.theta.cpu(), self.w.cpu(), xs.cpu(), self._active_layers
+            ).to(_device)
+        return self.a * expvals.float() + self.b   # (B,)
 
 
 class _FlexWrap(nn.Module):
-    """Wrap FlexQVN so its output is (B,1) as expected by critic_loss/value_loss."""
-    def __init__(self, net: FlexQuantumValueNetwork) -> None:
+    """Wrap QuantumValueNetwork so output is (B,1) as expected by losses."""
+    def __init__(self, net):
         super().__init__()
         self.net = net
 
-    def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        out = self.net(obs)
-        return out.to(torch.float32).unsqueeze(-1)
+    def forward(self, obs):
+        return self.net(obs).to(torch.float32).unsqueeze(-1)
 
 
 # ── Core training loops ───────────────────────────────────────────────────────
@@ -407,10 +337,10 @@ def _run_flex_seed(
     seed:         int = 0,
     n_steps:      int = NUM_STEPS,
 ) -> dict:
-    """One seed via FlexQuantumValueNetwork (topology / measurement ablations)."""
+    """One seed via QuantumValueNetwork (topology / measurement ablations)."""
     set_seed(seed)
     _obs_dim = obs_dim if obs_dim is not None else buffer.obs_dim
-    qvn  = FlexQuantumValueNetwork(
+    qvn  = QuantumValueNetwork(
         n_qubits=n_qubits, n_layers=n_layers,
         obs_dim=_obs_dim,
         entanglement=entanglement, measurement=measurement,
@@ -943,7 +873,7 @@ def analysis_fourier(env_cfg: dict, n_steps: int) -> None:
         ("deep(4q-3L-needs8q)", (8, 3)),   # n_layers=3 requires n_qubits=8
     ]:
         print(f"\n  Config: {label}")
-        qvn     = FlexQuantumValueNetwork(
+        qvn     = QuantumValueNetwork(
             n_qubits=n_qubits, n_layers=n_layers,
             obs_dim=buffer.obs_dim).to(DEVICE)
         wrapped = _FlexWrap(qvn)
@@ -1010,7 +940,7 @@ def analysis_fourier(env_cfg: dict, n_steps: int) -> None:
 
 
 def _fourier_snapshot(
-    qvn: FlexQuantumValueNetwork,
+    qvn: QuantumValueNetwork,
     obs_dim: int,
     n_points: int,
     feature: int,
