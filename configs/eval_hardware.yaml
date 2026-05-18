@@ -1,0 +1,61 @@
+# Offline hardware evaluation config for Q-IQL on Hopper-v4
+# Budgets, circuit params, stratification, and paths
+
+# ── Checkpoint ────────────────────────────────────────────────────────────────
+checkpoint: "experiments/checkpoints/hopper/medium/quantum-multi-qubit-readout/seed_6/checkpoint_final.pt"
+
+# ── Circuit ───────────────────────────────────────────────────────────────────
+n_qubits: 8
+n_layers: 3
+shots: 100
+hqc_per_call: 13.0   # Helios-1 estimate at shots=100
+
+# ── HQC Budgets ──────────────────────────────────────────────────────────────
+budget_phase1:  9000.0   # Helios emulator
+budget_phase2:   900.0   # Real Helios
+budget_reserve:  100.0   # Re-runs
+
+# ── Quantinuum ───────────────────────────────────────────────────────────────
+project_name: "quantum-iql"
+system_name_hardware: "Helios-1"
+system_name_emulator: "Helios-1E"
+
+helios_error_model:
+  p_1q: 2.5e-5    # Helios single-qubit fidelity 99.9975%
+  p_2q: 7.9e-4    # Helios two-qubit fidelity 99.921%
+  p_init: 1.0e-3  # Conservative SPAM estimate (not published)
+  p_meas: 1.0e-3  # Conservative SPAM estimate (not published)
+
+# ── Phase 0 Pool ─────────────────────────────────────────────────────────────
+pool:
+  seeds: [6, 42, 100, 2023]        # seed 6 is best; others for coverage
+  episodes_per_seed: 10
+  d4rl_sample_count: 500           # extra matched samples from D4RL hopper/medium-v0
+  output_path: "eval_pools/pool_seed6plus.npz"
+
+# ── Stratification ────────────────────────────────────────────────────────────
+strata:
+  timestep_buckets: [[0, 99], [100, 399], [400, 9999]]
+  z_height_bands:   [[0.7, 1.0], [1.0, 1.3], [1.3, 2.0]]
+  phase1_count: 250
+  phase2_count:  35
+
+# ── Phase 1 Emulator ──────────────────────────────────────────────────────────
+phase1:
+  output_dir: "eval_pools/phase1_results"
+  advantage_n_states: 96
+  advantage_n_actions: 2          # a_policy + a_perturbed
+  perturbation_sigma: 0.1
+
+# ── Phase 2 Hardware ─────────────────────────────────────────────────────────
+phase2:
+  output_dir: "eval_pools/phase2_results"
+  noiseless_ref_shots: 100        # shots=100 noiseless reference per state
+
+# ── Environments ────────────────────────────────────────────────────────────
+env_id: "Hopper-v4"
+dataset_id: "mujoco/hopper/medium-v0"
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+provenance:
+  log_path: "eval_pools/eval_provenance.json"

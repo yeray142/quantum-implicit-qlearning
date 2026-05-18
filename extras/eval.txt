@@ -1,0 +1,8 @@
+# Extras for offline hardware evaluation
+qnexus>=0.8
+guppylang>=0.9
+selene-sim>=0.5
+pytket-quantinuum>=1.30
+matplotlib
+pandas
+scipy
