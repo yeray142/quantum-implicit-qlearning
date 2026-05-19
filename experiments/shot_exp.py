@@ -19,16 +19,16 @@ Per-batch HQC (24 circuits each):
 Usage
 -----
   # 1. Free sanity check — PennyLane, no HQC spent
-  python shot_budget_helios.py --backend pennylane
+  python shot_exp.py --backend pennylane
  
   # 2. Free emulator — validates qnexus pipeline end-to-end
-  python shot_budget_helios.py --backend selene
+  python shot_exp.py --backend selene
  
   # 3. Real hardware — spends ~1,932 HQC
-  python shot_budget_helios.py --backend helios-1e
+  python shot_exp.py --backend helios-1e
  
   # Dry-run: prints HQC estimate and exits
-  python shot_budget_helios.py --backend helios-1e --dry-run
+  python shot_exp.py --backend helios-1e --dry-run
  
 Angle conventions
 -----------------
