@@ -50,7 +50,11 @@ def get_env_cfg(env_name: str, dataset: str = "medium"):
 def load_vnet(mode: str, ckpt: dict, obs_dim: int) -> nn.Module | None:
     """Load value network from checkpoint based on mode. Returns None for constant-v."""
     if "quantum" in mode:
-        vnet = QuantumValueNetwork(n_qubits=8, n_layers=3, obs_dim=obs_dim)
+        multi_qubit = ckpt["value_net"]["a"].shape[0] > 1
+        vnet = QuantumValueNetwork(
+            n_qubits=8, n_layers=3, obs_dim=obs_dim,
+            multi_qubit_readout=multi_qubit,
+        )
         vnet.load_state_dict(ckpt["value_net"], strict=False)
     elif mode == "classical-deep":
         vnet = ValueNetwork(obs_dim, hidden_dims=[8, 8, 8])

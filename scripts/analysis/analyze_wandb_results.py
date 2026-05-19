@@ -38,7 +38,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 sys.path.insert(0, str(_PROJECT_ROOT / "scripts"))
 
@@ -61,6 +61,7 @@ RUN_PREFIXES = {
     "quantum-fixed-hopper-medium":      ("hopper", "medium", "quantum-fixed"),
     "quantum-fixed-warmup-hopper-medium": ("hopper", "medium", "quantum-fixed-warmup"),
     "quantum-fixed-c-hopper-medium":    ("hopper", "medium", "quantum-fixed-c"),
+    "quantum-multi-qubit-readout-hopper-medium": ("hopper", "medium", "quantum-multi-qubit-readout"),
 }
 
 CHECKPOINT_BASE = _PROJECT_ROOT / "experiments" / "checkpoints"
@@ -256,7 +257,10 @@ def compute_p_neg_adv(mode_dir: str, seed: int, env: str, dataset: str) -> float
             vnet = None
         elif is_quantum:
             from quantum_iql import QuantumValueNetwork
-            vnet = QuantumValueNetwork(n_qubits=8, n_layers=3, obs_dim=11)
+            sd = ckpt["value_net"]
+            multi_qubit = sd["a"].shape[0] > 1 if "a" in sd else False
+            vnet = QuantumValueNetwork(n_qubits=8, n_layers=3, obs_dim=11,
+                                       multi_qubit_readout=multi_qubit)
         else:
             from quantum_iql.networks import ValueNetwork
             hidden_dims = _value_net_shape_from_ckpt(ckpt["value_net"]) or [256, 256]
@@ -336,7 +340,12 @@ def compute_ckpt_metrics(mode_dir: str, seed: int, env: str, dataset: str) -> di
             sd = ckpt["value_net"]
             # Quantum models store a and b directly
             b_final = float(sd["b"].item()) if "b" in sd else None
-            a_final = float(sd["a"].item()) if "a" in sd else None
+            a_val = sd["a"]
+            # Multi-qubit-readout has a tensor with >1 elements
+            if a_val.numel() == 1:
+                a_final = float(a_val.item())
+            else:
+                a_final = a_val.tolist()
         elif not is_constant_v and not is_quantum and "value_net" in ckpt:
             sd = ckpt["value_net"]
             # Classical models have net.4 as output layer with shape [1, hidden]
@@ -376,7 +385,10 @@ def compute_ckpt_metrics(mode_dir: str, seed: int, env: str, dataset: str) -> di
             from quantum_iql.networks import CriticNetwork
             if is_quantum:
                 from quantum_iql import QuantumValueNetwork
-                vnet = QuantumValueNetwork(n_qubits=8, n_layers=3, obs_dim=11)
+                sd = ckpt["value_net"]
+                multi_qubit = sd["a"].shape[0] > 1 if "a" in sd else False
+                vnet = QuantumValueNetwork(n_qubits=8, n_layers=3, obs_dim=11,
+                                          multi_qubit_readout=multi_qubit)
             else:
                 from quantum_iql.networks import ValueNetwork
                 hidden_dims = _value_net_shape_from_ckpt(ckpt["value_net"]) or [256, 256]
