@@ -28,7 +28,7 @@ import torch.optim as optim
 
 import wandb
 
-from .buffer import Batch, ReplayBuffer
+from .buffer import Batch, ReplayBuffer, _flatten_obs
 from .config import IQLConfig
 from .losses import actor_loss, critic_loss, value_loss
 from .networks import ActorNetwork, CriticNetwork, ValueNetwork
@@ -105,7 +105,7 @@ class IQLTrainer:
         ``critic_loss``.  Q has no separate target network because V̄
         already plays that role in the Bellman backup.
         """
-        self.value_target = ValueNetwork(
+        self.value_target: ValueNetwork = ValueNetwork(
             self.buffer.obs_dim,
             hidden_dims=self.cfg.value_net.hidden_dims,
             activation=self.cfg.value_net.activation,
@@ -219,6 +219,7 @@ class IQLTrainer:
 
         for ep_idx in range(self.cfg.eval_episodes):
             obs, _ = self.env.reset(seed=self.cfg.seed + ep_idx)
+            obs = _flatten_obs(obs)                 # ← antes: if isinstance(obs, dict): obs = obs["observation"]
             ep_return = 0.0
             done = False
 
@@ -228,6 +229,7 @@ class IQLTrainer:
                     action = self.actor_net.get_action(obs_t, deterministic=True)
                 action_np = action.squeeze(0).cpu().numpy()
                 obs, reward, terminated, truncated, _ = self.env.step(action_np)
+                obs = _flatten_obs(obs)             # ← antes: if isinstance(obs, dict): obs = obs["observation"]
                 ep_return += float(reward)
                 done = terminated or truncated
 
@@ -237,9 +239,9 @@ class IQLTrainer:
         returns_arr = np.array(returns)
         return {
             "eval/mean_return": float(returns_arr.mean()),
-            "eval/std_return": float(returns_arr.std()),
-            "eval/min_return": float(returns_arr.min()),
-            "eval/max_return": float(returns_arr.max()),
+            "eval/std_return":  float(returns_arr.std()),
+            "eval/min_return":  float(returns_arr.min()),
+            "eval/max_return":  float(returns_arr.max()),
         }
 
     # Main training loop

@@ -1,0 +1,71 @@
+{
+  "phase": "phase1_emulator",
+  "n_states": 10,
+  "shots": 100,
+  "hqc_consumed": 0.0,
+  "v_mse": {
+    "value": 147.55291748046875,
+    "ci_lo": 44.5855471611023,
+    "ci_hi": 300.4094436645507,
+    "n_samples": 10
+  },
+  "v_mae": {
+    "value": 9.32434368133545,
+    "ci_lo": 5.056318187713623,
+    "ci_hi": 14.02367136478424,
+    "n_samples": 10
+  },
+  "v_pearson": {
+    "value": 0.8878531455993652,
+    "ci_lo": 0.6611268594861031,
+    "ci_hi": 0.9810373395681381,
+    "n_samples": 10
+  },
+  "v_noiseless_mse": {
+    "value": 0.0,
+    "ci_lo": 0.0,
+    "ci_hi": 0.0,
+    "n_samples": 10
+  },
+  "v_noiseless_mae": {
+    "value": 0.0,
+    "ci_lo": 0.0,
+    "ci_hi": 0.0,
+    "n_samples": 10
+  },
+  "v_noiseless_pearson": {
+    "value": 1.0,
+    "ci_lo": 0.9999998211860657,
+    "ci_hi": 1.0,
+    "n_samples": 10
+  },
+  "kendall_tau_v_ranking": {
+    "value": 0.7777777777777777,
+    "n_states": 10
+  },
+  "q_policy_mean": 361.44256591796875,
+  "stratum_breakdown": [
+    {
+      "cell": 2,
+      "mse": 299.62884521484375,
+      "pearson": 0.5691219568252563,
+      "mae": 15.465187072753906,
+      "n_samples": 4
+    },
+    {
+      "cell": 5,
+      "mse": 34.28150177001953,
+      "pearson": 1.0,
+      "mae": 5.056671142578125,
+      "n_samples": 2
+    },
+    {
+      "cell": 8,
+      "mse": 52.11273193359375,
+      "pearson": 0.9855092763900757,
+      "mae": 5.3173370361328125,
+      "n_samples": 4
+    }
+  ],
+  "timestamp": "2026-05-17T11:12:22.766225+00:00"
+}

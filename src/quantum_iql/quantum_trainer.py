@@ -47,10 +47,8 @@ import time
 from typing import Any
 
 import torch
+import torch.nn as nn
 import torch.optim as optim
-
-# Quantum components (from issue #7 — lives in scripts/)
-from quantum_value_network import QuantumValueNetwork
 
 import wandb
 
@@ -60,11 +58,14 @@ from .networks import ActorNetwork, CriticNetwork, ValueNetwork
 
 # Hybrid config (this issue)
 from .quantum_config import QuantumIQLConfig
+
+# Quantum components
+from .quantum_value_network import QuantumValueNetwork
 from .trainer import IQLTrainer
 from .utils import hard_update
 
 # ---------------------------------------------------------------------------
-# Helper: gradient-norm utility
+# Helper: gradient-norm utility + shape adapter
 # ---------------------------------------------------------------------------
 
 def _grad_norm(param: torch.nn.Parameter) -> float:
@@ -72,6 +73,17 @@ def _grad_norm(param: torch.nn.Parameter) -> float:
     if param.grad is None:
         return 0.0
     return param.grad.detach().norm(2).item()
+
+
+class _Unsqueeze(nn.Module):
+    """Wrap a (B,) → (B,) network to produce (B,1) for value_loss / critic_loss."""
+
+    def __init__(self, net: nn.Module) -> None:
+        super().__init__()
+        self.net = net
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        return self.net(obs).unsqueeze(-1)
 
 
 # ---------------------------------------------------------------------------
@@ -153,21 +165,24 @@ class QuantumIQLTrainer(IQLTrainer):
         # ── Value network: quantum or classical ────────────────────────────
         if cfg.mode == "quantum":
             qv = cfg.quantum_value
-            self.value_net: ValueNetwork | QuantumValueNetwork = QuantumValueNetwork(
+            self.value_net = QuantumValueNetwork(
                 n_qubits=qv.n_qubits,
                 n_layers=qv.n_layers,
                 obs_dim=obs_dim,
                 device_name=qv.device_name,
                 diff_method=qv.diff_method,
                 running_stats=qv.running_stats,
-            ).to(self.device)
+                use_pre_encoder=qv.use_pre_encoder,
+                multi_qubit_readout=qv.multi_qubit_readout,
+            ).to(self.device)  # type: ignore[assignment]
             self._is_quantum = True
+            pre_mode = "pre_encode" if qv.use_pre_encoder else "truncate"
             print(
                 f"[QuantumIQLTrainer] mode=quantum  →  {self.value_net!r}\n"
                 f"  PennyLane device : {qv.device_name}\n"
                 f"  diff_method      : {qv.diff_method}\n"
                 f"  obs_dim          : {obs_dim}  →  {qv.n_qubits} qubits "
-                f"({'pad' if obs_dim < qv.n_qubits else 'truncate' if obs_dim > qv.n_qubits else 'exact'})"
+                f"({'pad' if obs_dim < qv.n_qubits else pre_mode})"
             )
         else:
             vcfg = cfg.value_net
@@ -200,7 +215,8 @@ class QuantumIQLTrainer(IQLTrainer):
                 device_name=qv.device_name,
                 diff_method=qv.diff_method,
                 running_stats=qv.running_stats,
-            ).to(self.device)
+                multi_qubit_readout=qv.multi_qubit_readout,
+            ).to(self.device)  # type: ignore[assignment]
             hard_update(self.value_target, self.value_net)
         else:
             vcfg = cfg.value_net
@@ -242,31 +258,22 @@ class QuantumIQLTrainer(IQLTrainer):
         )
 
     # ------------------------------------------------------------------
-    # Value update (adds quantum grad clipping)
+    # Value update (adds quantum grad clipping and Fix C freeze)
     # ------------------------------------------------------------------
 
-    def update_value(self, batch: Batch) -> dict[str, float]:
-        """Gradient step on V_ψ (quantum or classical).
-
-        Adds optional gradient clipping for quantum parameters and collects
-        quantum-specific diagnostic metrics when ``log_quantum_metrics=True``.
+    def _compute_v_loss(self, batch: Batch) -> tuple[torch.Tensor, torch.nn.Module]:
+        """Compute expectile loss on the value network, returning loss and vnet wrapper.
 
         Returns:
-            ``{"loss/value": float}`` plus, when mode=quantum:
-            ``{"quantum/grad_norm_theta": float, "quantum/grad_norm_w": float}``
+            v_loss: scalar tensor (not yet backpropped)
+            _vnet: the value network (or wrapper) to use for the loss
         """
         cfg: QuantumIQLConfig = self._qcfg
-        self.value_optimizer.zero_grad()
 
-        # ── quantum: subsample a smaller mini-batch for the circuit ───────
-        # The full batch (cfg.batch_size=256) would take ~15ms × 256 = 3.8s
-        # per forward pass on CPU simulation.  We subsample cfg.quantum_batch_size
-        # samples so each step stays tractable while the Q and actor updates
-        # (below) still use the full batch for better gradient estimates.
+        # Subsample for quantum circuit (keep full batch for Q/actor updates)
         if self._is_quantum and cfg.quantum_batch_size < batch.observations.shape[0]:
-            idx = torch.randperm(batch.observations.shape[0], device=batch.observations.device)[
-                :cfg.quantum_batch_size
-            ]
+            idx = torch.randperm(batch.observations.shape[0],
+                                 device=batch.observations.device)[:cfg.quantum_batch_size]
             vbatch = Batch(
                 observations=batch.observations[idx],
                 actions=batch.actions[idx],
@@ -277,38 +284,56 @@ class QuantumIQLTrainer(IQLTrainer):
         else:
             vbatch = batch
 
-        # ── forward + backward ────────────────────────────────────────────
-        # QuantumValueNetwork.forward returns (B,); wrap to (B,1) to match
-        # the shape contract expected by value_loss.
+        # Wrap quantum V to match shape (B,) → (B,1) for value_loss
+        _vnet: nn.Module
         if self._is_quantum:
-            import torch.nn as _nn
-            class _Unsqueeze(_nn.Module):
-                def __init__(self, net):
-                    super().__init__()
-                    self.net = net
-
-                def forward(self, obs):
-                    return self.net(obs).unsqueeze(-1)
-            _vnet = _Unsqueeze(self.value_net)  # type: ignore[assignment]
+            _vnet = _Unsqueeze(self.value_net)
         else:
             _vnet = self.value_net  # type: ignore[assignment]
-        loss = value_loss(_vnet, self.critic_net, vbatch, cfg.tau)  # type: ignore[arg-type]
-        loss.backward()
 
-        metrics: dict[str, float] = {"loss/value": loss.item()}
+        return value_loss(_vnet, self.critic_net, vbatch, cfg.tau), _vnet  # type: ignore[arg-type]
 
-        # ── quantum diagnostics & clipping ────────────────────────────────
+    def update_value(self, batch: Batch) -> dict[str, float]:
+        """Gradient step on V_ψ (quantum or classical).
+
+        Fix C (v_freeze_steps): during the freeze window the V loss is computed
+        for diagnostic logging but NO backward() or optimizer.step() is performed.
+        This allows Q to bootstrap toward r + γ·V_fix before V begins moving,
+        preventing the cold-start overshoot from Fix A bias initialisation.
+
+        Returns:
+            ``{"loss/value": float}`` plus, when mode=quantum:
+            ``{"quantum/grad_norm_theta": float, "quantum/grad_norm_w": float}``
+            plus ``{"v_freeze_active": 1.0}`` during the freeze window.
+        """
+        cfg: QuantumIQLConfig = self._qcfg
+        v_loss, _vnet = self._compute_v_loss(batch)
+        metrics: dict[str, float] = {"loss/value": v_loss.item()}
+
+        # ── Fix C: V-gradient freeze for cold-start mitigation ─────────────
+        # During freeze: compute loss for logging but do NOT backprop or step.
+        # Q and actor updates proceed normally. V circuit remains at Fix A init.
+        if cfg.fix_c_enabled and self._step < cfg.v_freeze_steps:
+            metrics["v_freeze_active"] = 1.0
+            metrics["v_freeze_remaining"] = cfg.v_freeze_steps - self._step
+        else:
+            # Normal V update
+            self.value_optimizer.zero_grad()
+            v_loss.backward()
+
+            if self._is_quantum and cfg.quantum_grad_clip > 0.0:
+                torch.nn.utils.clip_grad_norm_(
+                    self.value_net.parameters(), cfg.quantum_grad_clip
+                )
+
+            self.value_optimizer.step()
+
+        # ── Quantum diagnostics (logged every log_interval, regardless of freeze) ──
         if self._is_quantum and cfg.log_quantum_metrics:
             qnet: QuantumValueNetwork = self.value_net  # type: ignore[assignment]
             metrics["quantum/grad_norm_theta"] = _grad_norm(qnet.theta)
             metrics["quantum/grad_norm_w"]     = _grad_norm(qnet.w)
 
-        if self._is_quantum and cfg.quantum_grad_clip > 0.0:
-            torch.nn.utils.clip_grad_norm_(
-                self.value_net.parameters(), cfg.quantum_grad_clip
-            )
-
-        self.value_optimizer.step()
         return metrics
 
     # ------------------------------------------------------------------
@@ -324,18 +349,9 @@ class QuantumIQLTrainer(IQLTrainer):
         """
         self.critic_optimizer.zero_grad()
 
+        _vtarget: nn.Module
         if self._is_quantum:
-            import torch.nn as _nn
-
-            class _Unsqueeze(_nn.Module):
-                def __init__(self, net):
-                    super().__init__()
-                    self.net = net
-
-                def forward(self, obs):
-                    return self.net(obs).unsqueeze(-1)
-
-            _vtarget = _Unsqueeze(self.value_target)  # type: ignore[assignment]
+            _vtarget = _Unsqueeze(self.value_target)
         else:
             _vtarget = self.value_target  # type: ignore[assignment]
 

@@ -28,6 +28,27 @@ class LayerwiseScheduleEntry:
     active_layers: int = 1
 
 
+def make_layerwise_schedule(total_steps: int) -> list[LayerwiseScheduleEntry]:
+    """Build a proportional layerwise warm-up schedule.
+
+    Proportions (10% → L2, 30% → L3) follow Skolik et al. 2021 to avoid
+    barren plateaus at initialisation.
+
+    Args:
+        total_steps: Total training steps (used to scale the percentages).
+
+    Returns:
+        A list of ``LayerwiseScheduleEntry`` sorted by ``start_step``.
+    """
+    l2 = max(1, round(total_steps * 0.10))
+    l3 = max(l2 + 1, round(total_steps * 0.30))
+    return [
+        LayerwiseScheduleEntry(start_step=0,  active_layers=1),
+        LayerwiseScheduleEntry(start_step=l2, active_layers=2),
+        LayerwiseScheduleEntry(start_step=l3, active_layers=3),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Quantum-specific configuration
 # ---------------------------------------------------------------------------
@@ -52,6 +73,13 @@ class QuantumNetConfig:
     device_name: str = "default.qubit"
     diff_method: str = "backprop"
     running_stats: bool = True
+    # When obs_dim > n_qubits, a trainable classical pre-encoder (obs_dim → n_qubits)
+    # maps the arctan-encoded state to the circuit input, replacing the legacy
+    # truncation. Set to False to reproduce prior results with truncation.
+    use_pre_encoder: bool = True
+    # Multi-qubit readout: when True, V(s) = Σᵢ aᵢ⟨Zᵢ⟩ + b (8 readout coefficients).
+    # When False, V(s) = a⟨Z₀⟩ + b (single-qubit readout, original design).
+    multi_qubit_readout: bool = False
     layerwise_schedule: list[LayerwiseScheduleEntry] = field(
         default_factory=lambda: [
             LayerwiseScheduleEntry(start_step=0,      active_layers=1),
@@ -106,6 +134,15 @@ class QuantumIQLConfig(IQLConfig):
     # Diagnostics
     log_quantum_metrics: bool = True
     stats_update_interval: int = 1_000  # steps between running-stats refresh
+
+    # Fix C: freeze V optimizer step for cold-start mitigation.
+    # At step 0, V(s) ≈ b_init ≈ 374 (Fix A) but Q(s,a) ≈ 0 (random init),
+    # so L(V)_0 ≈ τ·374² ≈ 98,000. With unit-norm clipping the V optimizer
+    # takes ~10k clipped steps before Q bootstraps, causing systematic overshoot.
+    # Freezing V for the first v_freeze_steps lets Q bootstrap toward
+    # r + γ·374 before V begins moving.
+    fix_c_enabled: bool = False
+    v_freeze_steps: int = 1500
 
 
 def load_quantum_config(

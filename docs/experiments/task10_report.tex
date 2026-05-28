@@ -1,0 +1,862 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[margin=2cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+\usepackage{parskip}
+\usepackage{xcolor}
+\usepackage{titlesec}
+
+\titleformat{\section}{\normalsize\bfseries}{\thesection.}{0.5em}{}
+\titleformat{\subsection}{\normalsize\itshape}{\thesubsection.}{0.5em}{}
+\titlespacing{\section}{0pt}{8pt}{3pt}
+\titlespacing{\subsection}{0pt}{5pt}{2pt}
+
+\definecolor{darkred}{rgb}{0.7,0.0,0.0}
+\definecolor{darkgreen}{rgb}{0.0,0.45,0.0}
+
+\title{\textbf{Benchmark Analysis \& Ablation Study}\\[2pt]
+  \large Classical vs.\ Quantum vs.\ Classical-Small IQL\\
+  + Constant-V + Depth-Matched + Warm-up Ablation
+  + Fix A\,+\,B Repair + Fix A Isolation\\
+  Hopper-v4 $\cdot$ \texttt{medium-v0} $\cdot$ 100\,k steps}
+\author{Yeray Cordero Carrasco \\ QC810 --- Quantum Machine Learning, SDU}
+\date{May 2026}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+%──────────────────────────────────────────────────────────────────────────────
+\section{Experimental Setup}
+
+Eight variants of Implicit Q-Learning (IQL)~\cite{kostrikov2021} were trained
+for 100\,000 gradient steps on \texttt{mujoco/hopper/medium-v0}.
+Critic $Q(s,a)$ and actor $\pi(a|s)$ are identical classical MLPs $[256,256]$
+across all variants. Only the value network $V(s)$ varies:
+
+\begin{itemize}
+  \item \textbf{Classical}: MLP $V(s)$ with hidden dims $[256,256]$,
+        \textbf{69\,121} parameters. Seeds $\{0,1,2\}$.
+  \item \textbf{Quantum (Warmup)}: DRU circuit $V(s)$, $n_q=8$ qubits,
+        $n_L=3$ layers, \textbf{146 parameters}. Layerwise warm-up
+        schedule~\cite{skolik2021} activates layers at steps
+        $\{0,10\text{k},30\text{k}\}$. Trained with PennyLane
+        \texttt{backprop} on \texttt{default.qubit} (GPU).
+        Seeds $\{0,1,2\}$.
+  \item \textbf{Classical-Small}: single-hidden-layer MLP, width 11,
+        \textbf{144 parameters}. Seeds $\{0,1,2\}$.
+  \item \textbf{Constant-V}: $V(s)\equiv100$ (frozen scalar),
+        \textbf{0 trainable parameters}. The constant matches the affine
+        bias $b\approx100$ learned by the quantum circuit across all
+        warmup seeds (Section~\ref{sec:scale}). Seeds $\{0,1,2\}$.
+  \item \textbf{Classical-Deep}: depth-3 MLP $[8,8,8]$, \textbf{249
+        parameters}. Depth-matched to the 3-layer DRU circuit; a fairer
+        architectural control than depth-1 Classical-Small.
+        Seeds $\{0,1,2\}$.
+  \item \textbf{Quantum No-Warmup}: identical DRU circuit (8q, 3L, 146
+        params) with all three layers active from step~0.
+        Seeds $\{0,\ldots,7\}$ ($n=8$).
+  \item \textbf{Quantum Fixed} (\emph{Fix A\,+\,B}): DRU circuit with all
+        layers active from step~0 (Fix~B) and affine head initialised at
+        $b=374$, $a=55$ (Fix~A), placing $V_0(s)\in[319,429]$ at the
+        correct value scale from the first gradient step. $b=374$ is the
+        geometric-sum estimate $\bar{r}/(1-\gamma)$ for this dataset;
+        $a=55$ matches the standard deviation of the classical $V$.
+        Seeds $\{0,1,2\}$.
+  \item \textbf{Quantum Fixed-Warmup} (\emph{Fix A only}): DRU circuit
+        with the same affine-head initialisation ($b=374$, $a=55$,
+        Fix~A) but retaining the original Skolik layerwise warm-up
+        schedule. Isolates the effect of correct scale initialisation
+        from the effect of warmup removal. Seeds $\{0,1,2\}$.
+\end{itemize}
+
+\paragraph{Calibration criteria used throughout.}
+We distinguish three increasingly strict criteria for the IQL expectile
+calibration $P(A<0)$:
+\begin{itemize}
+  \item \emph{Direction-correct}: $P(A<0)>0.5$, i.e.\ $V$ sits above the
+        median of $Q$.
+  \item \emph{On-target}: $P(A<0)\in[0.6,\,0.8]$, within reasonable distance
+        of the IQL design target $\tau=0.70$.
+  \item \emph{Over-calibrated}: $P(A<0)>0.8$, $V$ above the 80th percentile
+        of $Q$.
+\end{itemize}
+Reported confidence intervals for proportions use the Wilson score interval
+at 95\% confidence; tests on returns use Welch's two-sample $t$-test (unequal
+variances); tests on proportions use Fisher's exact test (two-sided).
+
+%──────────────────────────────────────────────────────────────────────────────
+\section{Results Summary}
+
+\begin{table}[h]
+\centering
+\caption{Final evaluation return at 100\,k steps. CV = coefficient of
+variation. Correct IQL expectile calibration requires
+$P(A{<}0)\approx\tau=0.70$. No-warmup uses $n=8$ seeds; all other modes
+$n=3$.}
+\label{tab:returns}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{lrrrrrr}
+\toprule
+\textbf{Mode} & \textbf{Mean} & \textbf{Std} & \textbf{CV} &
+  \textbf{V-params} & $\mathbb{E}[A]$ & $P(A{<}0)$ \\
+\midrule
+Classical (69\,121 params)
+  & 3505.8 & 16.2  & 0.5\%  & 69\,121 & $-0.94$ & 0.70--0.88 \\
+Classical-Deep [8,8,8] (249 params)
+  & \textbf{3474.9} & \textbf{8.1} & \textbf{0.2\%} & 249
+  & $-1.20$ & $\approx$0.70 \\
+\textcolor{darkgreen}{Quantum Fixed (Fix A\,+\,B, 146 params)}
+  & \textcolor{darkgreen}{3525.7}
+  & \textcolor{darkgreen}{29.3}
+  & \textcolor{darkgreen}{0.8\%}
+  & \textcolor{darkgreen}{146}
+  & \textcolor{darkgreen}{$-0.29$}
+  & \textcolor{darkgreen}{0.41--\textbf{0.74}} \\
+\textcolor{darkgreen}{Quantum Fixed-Warmup (Fix A only, 146 params)}
+  & \textcolor{darkgreen}{3512.1}
+  & \textcolor{darkgreen}{41.6}
+  & \textcolor{darkgreen}{1.2\%}
+  & \textcolor{darkgreen}{146}
+  & \textcolor{darkgreen}{$-0.63$}
+  & \textcolor{darkgreen}{0.56--0.84} \\
+Quantum Warmup (146 params)
+  & 3409.1 & 95.2  & 2.8\%  & 146     & $+2.73$ & 0.08--0.42 \\
+Quantum No-Warmup (146 params, $n{=}8$)
+  & 2794.5 & 817.4 & 29.2\% & 146     & $+4.4$  & 0.03--0.78 \\
+\textcolor{darkred}{Constant-V ($V\equiv100$, 0 params)}
+  & \textcolor{darkred}{2929.3}
+  & \textcolor{darkred}{732.8}
+  & \textcolor{darkred}{25.0\%}
+  & \textcolor{darkred}{0}
+  & \textcolor{darkred}{$+2.88$}
+  & \textcolor{darkred}{(inverted)} \\
+Classical-Small [11] (144 params)
+  & 1957.9 & 1103.6 & 56.4\% & 144    & $-1.89$ & 0.64--0.70 \\
+\midrule
+\multicolumn{7}{l}{\footnotesize IQL paper reference (1\,M steps):
+  $\approx$3\,500 raw return.\quad Constant-V = 83.6\% of Classical.}\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%──────────────────────────────────────────────────────────────────────────────
+\section{Diagnostic Analysis}
+
+\subsection{Quantum V(s) Operates at the Wrong Scale}
+\label{sec:scale}
+
+The DRU circuit outputs measurements $\langle Z_0\rangle\in[-1,1]$ scaled by
+an affine head $V(s)=a\cdot\langle Z_0\rangle+b$.
+Inspection of trained checkpoints reveals:
+
+\begin{center}
+\setlength{\tabcolsep}{9pt}
+\begin{tabular}{lrrrr}
+\toprule
+Quantum (Warmup) seed & $a$ & $b$ & $V$ range & $\sigma(V)$ \\
+\midrule
+0 &  4.96 &  99.8 & $[94.8,\;104.7]$ & 1.74 \\
+1 & 64.68 &  94.4 & $[29.7,\;159.1]$ & 19.1 \\
+2 & 81.41 &  98.9 & $[17.5,\;180.3]$ & 0.05 \\
+\midrule
+\multicolumn{5}{l}{\footnotesize Classical V: mean $\approx377$,
+  range $[-4,\;434]$, $\sigma\approx55$.}\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The classical $V(s)$ correctly operates at mean $\approx377$, matching the
+geometric-sum approximation $\bar{r}/(1-\gamma)=374$.
+All three warmup seeds converge to $b\approx100$, roughly one-quarter of the
+correct scale.
+This is a structural constraint: the affine head cannot stretch the bounded
+measurement output $\langle Z_0\rangle\in[-1,1]$ far enough to reach
+$V\approx374$ when initialised at $b\approx0$.
+
+\subsection{Expectile Calibration: Inverted Advantage Sign}
+
+For IQL with $\tau=0.7$, the value function should sit at the 0.7-expectile
+of $Q_{\min}(s,a)$, implying $P(A<0)\approx0.70$ over dataset transitions.
+Computed directly on 20\,000 dataset samples:
+
+\begin{center}
+\setlength{\tabcolsep}{8pt}
+\begin{tabular}{lrrrr}
+\toprule
+Mode / seed & $\bar V$ & $\bar Q$ & $\mathbb{E}[A]$ & $P(A{<}0)$ \\
+\midrule
+Classical / s0    & 377.0 & 376.4 & $-0.66$ & \textcolor{darkgreen}{0.701} \\
+Classical / s1    & 377.2 & 376.5 & $-0.65$ & \textcolor{darkgreen}{0.714} \\
+Classical / s2    & 379.3 & 377.7 & $-1.61$ & 0.882 \\
+Classical-Deep    & $\sim$377 & $\sim$376 & $\sim{-1.2}$ & $\sim$0.70 \\
+\midrule
+Quantum Warmup / s0 & 101.2 & 102.3 & $+1.07$ & \textcolor{darkred}{0.288} \\
+Quantum Warmup / s1 & 130.4 & 137.8 & $+7.38$ & \textcolor{darkred}{0.420} \\
+Quantum Warmup / s2 & 180.3 & 181.7 & $+1.35$ & \textcolor{darkred}{0.076} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Classical seeds 0 and 1 land within 0.02 of the IQL target (0.701 and
+0.714).
+All three warmup seeds have $P(A<0)<0.5$ (95\% Wilson CI for direction-correct
+rate: $[0\%,\,56\%]$), with $V$ sitting \emph{below} the mean of $Q$---the
+opposite direction from IQL's design.
+Seed~2 is particularly revealing: $\sigma(V)=0.05$ (effectively constant,
+$V\equiv180$), yet achieves the best return of the original nine runs (3539).
+The value network is functioning as a passenger.
+
+\subsection{Constant-V Ablation: Decisive Evidence}
+\label{sec:constv}
+
+Replacing $V(s)$ with the frozen scalar $c=100$ (zero trainable parameters,
+no backward pass through $V$) yields:
+
+\begin{center}
+\setlength{\tabcolsep}{8pt}
+\begin{tabular}{lrrr}
+\toprule
+Constant-V seed & Return & $\mathbb{E}[A]$ & $\mathbb{E}[e^{\beta A}]$ \\
+\midrule
+0 & 1904.5 & $+2.83$ & 93.9 \\
+1 & \textbf{3575.7} & $+3.27$ & 96.6 \\
+2 & 3307.6 & $+2.54$ & 93.1 \\
+\midrule
+Mean $\pm$ Std & $2929.3 \pm 732.8$ & & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The constant-V agent achieves 83.6\% of classical performance at zero
+parameter cost.
+Its advantage statistics ($\mathbb{E}[A]\approx+2.9$,
+$\mathbb{E}[e^{\beta A}]\approx94$) are essentially identical to the warmup
+quantum agent's ($\mathbb{E}[A]\approx+2.7$, $\mathbb{E}[e^{\beta A}]\approx51$).
+Both operate in the same degenerate regime: when $V\equiv c$, the Bellman
+target becomes $r+\gamma c$, so $Q\approx r+\gamma c$ and
+$A\approx r-c(1-\gamma)$.
+The actor then upweights high-reward transitions---a 1-step greedy policy
+amounting to reward-weighted behavioural cloning.
+The bimodality across constant-V seeds (seed~0 fails at 1904, seeds~1--2
+succeed) mirrors the warmup quantum bimodality, confirming variance in this
+regime is driven by Q-network initialisation, not by $V$.
+
+\subsection{Depth-Matched Baseline: Classical-Deep [8,8,8]}
+
+\begin{center}
+\setlength{\tabcolsep}{8pt}
+\begin{tabular}{lrrr}
+\toprule
+Classical-Deep seed & Return & $\mathbb{E}[A]$ & $P(A{<}0)$ \\
+\midrule
+0 & 3486.0 & $-1.11$ & $\approx0.70$ \\
+1 & 3471.9 & $-1.77$ & $\approx0.70$ \\
+2 & 3466.9 & $-0.73$ & $\approx0.70$ \\
+\midrule
+Mean $\pm$ Std & $3474.9 \pm 8.1$ & & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A depth-3 MLP $[8,8,8]$ with 249 parameters achieves 99.1\% of classical
+performance with CV\,=\,0.2\%---the most reproducible result across all
+non-fixed configurations.
+This collapses the initial framing of depth-1 Classical-Small as a fair
+parameter-matched control: Classical-Small ($[11]$, 144 params) fails not
+because of its parameter budget but because depth-1 MLPs cannot represent
+the V-expectile surface on this task.
+The DRU circuit has effective depth~3 through its three re-uploading layers;
+the correct depth-matched classical baseline succeeds reliably while the
+quantum circuit (in its original configuration) does not.
+
+%──────────────────────────────────────────────────────────────────────────────
+\section{Warm-up Schedule Ablation: Quantum No-Warmup}
+
+\subsection{Per-Seed Results, $n=8$}
+
+\begin{center}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{clrrrrrr}
+\toprule
+\textbf{Seed} & \textbf{Config} & \textbf{Return} & $\mathbb{E}[A]$
+  & $P(A{<}0)$ & $\|\nabla\theta\|_\text{early}$
+  & $\|\nabla\theta\|_\text{late}$ & $\|\nabla\theta\|_\text{max}$ \\
+\midrule
+0 & Warmup    & 3374.7 & $+1.33$ & 0.288
+  & 0.395 &  1.40 &   4.2 \\
+0 & No-warmup & 3238.0 & $+31.2$ & \textcolor{darkred}{0.030}
+  & 3.158 & 97.37 & 448.4 \\
+\midrule
+1 & Warmup    & 3313.6 & $+5.60$ & 0.420
+  & 0.00004 & 52.25 & 199.2 \\
+1 & No-warmup & \textbf{3606.1} & $\mathbf{-3.03}$
+  & \textcolor{darkgreen}{\textbf{0.784}}
+  & 5.581 & 13.98 &  37.7 \\
+\midrule
+2 & Warmup    & 3539.0 & $+1.27$ & 0.076
+  & 0.551 &  1.83 &  22.8 \\
+2 & No-warmup & 3535.2 & $+3.68$ & \textcolor{darkred}{0.181}
+  & 6.206 &  9.18 &  14.1 \\
+\midrule
+3 & No-warmup & 1996.8 & $+3.76$ & \textcolor{darkred}{0.422}
+  & 2.788 & 34.26 &  98.0 \\
+4 & No-warmup & 2595.5 & $+2.30$ & \textcolor{darkred}{0.410}
+  & 2.750 & 28.80 &  62.0 \\
+\midrule
+5 & No-warmup & 2612.8 & $+0.61$ & 0.575
+  & --- & --- &  11.6 \\
+6 & No-warmup & 3589.2 & $+4.81$ & \textcolor{darkred}{0.176}
+  & --- & --- &  51.4 \\
+7 & No-warmup & 1182.1 & $+7.36$ & \textcolor{darkred}{0.394}
+  & --- & --- & 187.4 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\vspace{3pt}
+``Early'' = mean $\|\nabla\theta\|$ at steps 0--10k; ``late'' = steps
+30k--100k. Seeds 5--7 were analysed post-hoc without early/late gradient
+breakdowns.
+
+\subsection{Statistical Summary, Warmup vs No-Warmup}
+
+\begin{center}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{lrrrrr}
+\toprule
+\textbf{Config} & \textbf{Mean return} & \textbf{CV}
+  & $N(P(A{<}0)>0.5)$ & $N(P{\in}[0.6,0.8])$
+  & $N(\|\nabla\theta\|>50)$ \\
+\midrule
+Warmup ($n=3$)    & $3409.1 \pm  95.2$ &  2.8\% & 0/3 & 0/3 & 1/3 \\
+No-Warmup ($n=8$) & $2794.5 \pm 817.4$ & 29.2\% & 2/8 & 1/8 & 5/8 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Return.} Welch's $t$-test on the 11 returns gives $t=1.94$,
+$p=0.090$ (Cohen's $d=0.80$): the no-warmup mean is substantially below the
+warmup mean, but the comparison is borderline rather than conventionally
+significant due to the n=3 warmup arm.
+A more powerful test compares no-warmup to Constant-V, since the diagnostic
+prediction is that without scale correction the quantum agent collapses to the
+constant-V regime. Welch's $t$-test on these gives $t=-0.22$, $p=0.84$:
+\textbf{no-warmup return is statistically indistinguishable from a frozen
+scalar value function.} This is the crispest empirical demonstration that
+warmup removal alone does not rescue the quantum value learner.
+
+\paragraph{Calibration.}
+Direction-correct rate: 0/3 (warmup) vs 2/8 (no-warmup); on-target rate:
+0/3 vs 1/8.
+Wilson 95\% CIs are $[0\%,56\%]$ for warmup direction-correct,
+$[7\%,59\%]$ for no-warmup direction-correct, and $[2\%,47\%]$ for no-warmup
+on-target.
+Fisher exact tests do not reject independence at any of these contrasts
+($p\geq0.49$): n=3 versus n=8 is too underpowered to detect the difference
+formally, but the no-warmup configuration is the only one of the two in which
+\emph{any} seed exits the inverted-advantage regime.
+
+\paragraph{Gradient explosion.}
+Adopting a fixed threshold $\|\nabla\theta\|_\text{max}>50$ for explosion:
+warmup 1/3, no-warmup 5/8. Fisher exact $p=0.55$.
+At a more permissive threshold $>10$, all 8 no-warmup seeds qualify against
+2/3 warmup seeds (Fisher $p=0.27$). Neither comparison is significant, but
+the no-warmup gradient distribution is qualitatively heavier-tailed (max
+values 14--448 versus 4--199) and the explosions correlate with calibration
+failure: among the 5 no-warmup seeds with $\|\nabla\theta\|>50$, all 5 fail
+the on-target criterion.
+
+\subsection{No-Warmup as a Stability/Calibration Trade-off}
+
+The two configurations represent different points on a stability-versus-
+calibration trade-off rather than one being strictly preferable.
+
+Warmup suppresses early-phase gradients (0.4--0.6) and yields low return CV
+(2.8\%). The cost is that direction-correct calibration is never achieved
+(0/3) and on-target calibration is never achieved (0/3): the Skolik schedule
+prevents the V-Q bootstrapping loop from finding the trajectory that places
+$V$ above $\bar Q$.
+
+No-warmup allows the full circuit to explore the optimisation landscape from
+step~0. This raises the gradient explosion rate (5/8 at $>50$, 8/8 at $>10$)
+and inflates return CV to 29.2\%, but creates the conditions under which a
+minority of seeds reach the direction-correct regime (2/8, 95\% CI
+$[7\%,59\%]$).
+
+Neither configuration is reliable in isolation. Their juxtaposition motivates
+a different intervention---one that preserves multi-layer gradient exploration
+but constrains the optimisation initial condition rather than its dynamics.
+This is what Fix~A does (Section~\ref{sec:fixab}).
+
+\subsection{No-Warmup Seed 1: The Only On-Target Default-Init Quantum Run}
+
+Across all 11 default-init quantum seeds (warmup $n=3$ + no-warmup $n=8$),
+seed~1 (no-warmup) is the sole run to satisfy the on-target criterion
+$P(A{<}0)\in[0.6,0.8]$.
+Its affine head converges to $a=32.1$, $b=61.0$, giving $V\in[42.4,\,80.1]$
+with $P(A{<}0)=0.784$ and $\mathbb{E}[A]=-3.3$.
+Value loss decreases monotonically from 20 to 11, gradient norms are stable
+throughout ($5.6\to14\to14$, max 37.7), and $\sigma(V)$ settles at 8.97,
+indicating meaningful state-dependent discrimination.
+
+Note that this calibration is correct in expectile \emph{direction}
+($V$ above $\bar Q$) but at the wrong absolute scale: $\bar V\approx62$
+versus the dataset-correct value $\approx374$.
+A well-calibrated policy still results ($\text{return}=3606$), consistent
+with Hopper-medium's properties: the actor succeeds whenever advantage signs
+are correct, regardless of absolute V magnitude.
+This seed demonstrates the circuit \emph{can} find the correct optimisation
+trajectory from random initialisation, with empirical probability 1/8
+(Wilson CI $[2\%,47\%]$).
+
+\subsection{Why the Warm-up Schedule Is Not the Right Mitigation Here}
+
+The Skolik schedule was validated on variational quantum eigensolvers (VQE)
+and supervised quantum models with stationary loss landscapes.
+In IQL, the V-loss landscape shifts continuously as Q bootstraps from
+$\bar{V}$: activating a new layer abruptly changes $V(s')$, which changes the
+Bellman target $r+\gamma\bar{V}(s')$, which in turn changes the Q-loss
+landscape.
+The phase-activation transitions are therefore not curriculum steps in a fixed
+landscape but discontinuous perturbations of a coupled V-Q optimisation.
+
+The empirical evidence is consistent with this account. Warmup seed~1 collapses
+to a barren plateau in its restricted 1-layer subspace
+($\|\nabla\theta\|_{L=1}\approx4\times10^{-5}$), then receives a destabilising
+perturbation when layers~2 and~3 are activated, ultimately reaching
+$\|\nabla\theta\|_\text{max}=199$.
+No-warmup seed~1---the same initialisation without the schedule---avoids both
+failure modes and reaches direction-correct calibration.
+The schedule trades one failure mode (multi-layer chaos) for another
+(single-layer barren plateau plus target-shift shock at activation
+boundaries) rather than solving the underlying instability.
+
+%──────────────────────────────────────────────────────────────────────────────
+\section{Fix A\,+\,B Repair and Fix A Isolation}
+\label{sec:fixab}
+
+\subsection{Per-Seed Results}
+
+\begin{center}
+\setlength{\tabcolsep}{4.5pt}
+\begin{tabular}{clrrrrrrr}
+\toprule
+\textbf{Seed} & \textbf{Config} & \textbf{Return} & $\mathbb{E}[A]$
+  & $P(A{<}0)$ & $\mathcal{L}(V)_\text{final}$
+  & $\|\nabla\theta\|_\text{max}$ & $b_\text{final}$ & $a_\text{final}$ \\
+\midrule
+0 & Warmup       & 3374.7 & $+1.07$ & 0.288 &  99.1 &   4.2 &  99.8 &   5.0 \\
+0 & No-warmup    & 3238.0 & $+31.1$ & 0.030 & 1130  & 320   &  90.8 &  65.7 \\
+0 & \textbf{Fixed}        & 3565.1 & $+5.91$ & 0.412 & 407 & 656 & 455.8 & 123.4 \\
+0 & Fixed-Warmup & 3466.1 & $-0.70$ & \textcolor{darkgreen}{0.844} & 44.4 & 109.6 & 401.3 & 3.9 \\
+\midrule
+1 & Warmup       & 3313.6 & $+5.60$ & 0.420 &  99.1 & 199   &  94.4 &  64.7 \\
+1 & No-warmup    & 3606.1 & $-3.03$ & \textcolor{darkgreen}{0.784} &  11.4 &  37.7 &  61.0 &  32.1 \\
+1 & \textbf{Fixed}        & 3517.0 & $-0.87$ & \textcolor{darkgreen}{\textbf{0.744}} & \textbf{2.0} & 851 & 378.2 & 58.5 \\
+1 & Fixed-Warmup & 3503.4 & $-0.77$ & \textcolor{darkgreen}{0.814} & 1.5 & 326.9 & 383.5 & 6.4 \\
+\midrule
+2 & Warmup       & 3539.0 & $+1.27$ & 0.076 &  99.1 &  22.8 &  98.9 &  81.4 \\
+2 & No-warmup    & 3535.2 & $+3.68$ & 0.181 &  27.7 &  14.1 &  98.0 &  11.3 \\
+2 & \textbf{Fixed}        & 3495.0 & $-0.58$ & \textcolor{darkgreen}{0.534} & 17.1 & 441 & 380.6 &   2.6 \\
+2 & Fixed-Warmup & 3566.8 & $-0.42$ & \textcolor{darkgreen}{0.555} & 24.0 & 189.4 & 419.7 & 3.5 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Aggregate Calibration Counts and Return Comparisons}
+
+\begin{center}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{lrrrrr}
+\toprule
+\textbf{Config} & \textbf{Mean return} & \textbf{CV}
+  & $N(P{>}0.5)$ & $N(P{\in}[0.6,0.8])$ & $N(P{>}0.8)$ \\
+\midrule
+Warmup ($n=3$)              & $3409.1 \pm  95.2$ &  2.8\% & 0/3 & 0/3 & 0/3 \\
+No-Warmup ($n=8$)           & $2794.5 \pm 817.4$ & 29.2\% & 2/8 & 1/8 & 0/8 \\
+\textcolor{darkgreen}{\textbf{Fixed (A\,+\,B, $n=3$)}}
+  & \textcolor{darkgreen}{\textbf{3525.7 $\pm$ 29.3}}
+  & \textcolor{darkgreen}{\textbf{0.8\%}}
+  & \textcolor{darkgreen}{\textbf{2/3}}
+  & \textcolor{darkgreen}{\textbf{1/3}} & 0/3 \\
+\textcolor{darkgreen}{Fixed-Warmup (A only, $n=3$)}
+  & \textcolor{darkgreen}{$3512.1 \pm 41.6$}
+  & \textcolor{darkgreen}{1.2\%}
+  & \textcolor{darkgreen}{3/3} & 0/3 & 2/3 \\
+\midrule
+\textbf{Fix-A pool (Fixed + Fixed-Warmup, $n=6$)}
+  & $\mathbf{3519.1 \pm 39.6}$ & 1.1\% & \textbf{5/6} & 1/6 & 2/6 \\
+\textbf{Default pool (Warmup + No-Warmup, $n=11$)}
+  & $\mathbf{2962.3 \pm 786.7}$ & 26.6\% & \textbf{2/11} & 1/11 & 0/11 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Pooled Fix-A vs default-init: the headline statistical result.}
+Pooling the two Fix-A configurations against the two default-init
+configurations yields the only conventionally significant tests in the study:
+
+\begin{itemize}
+  \item \emph{Final return}: Fix-A pool $3519\pm40$ (n=6) vs default pool
+        $2962\pm787$ (n=11). Welch's $t=2.34$, $\mathbf{p=0.041}$, Cohen's
+        $d=0.87$ (large effect).
+  \item \emph{Direction-correct calibration}: Fix-A 5/6 (Wilson CI
+        $[44\%,97\%]$) vs default 2/11 (Wilson CI $[5\%,48\%]$). Fisher
+        exact two-sided $\mathbf{p=0.034}$.
+\end{itemize}
+
+These two tests provide the principal statistical evidence that correct
+scale initialisation (Fix~A) is the dominant and effective intervention.
+
+\paragraph{Within-cell tests are underpowered.}
+Pairwise Welch tests on returns at n=3 versus n=3 (or n=3 versus n=8) do not
+reach significance even when point estimates differ substantially:
+
+\begin{center}
+\setlength{\tabcolsep}{8pt}
+\begin{tabular}{lrr}
+\toprule
+Comparison & Welch $p$ & Cohen's $d$ \\
+\midrule
+Fixed vs Warmup                     & 0.22  & 1.35 \\
+Fixed vs No-Warmup                  & 0.050 & 0.95 \\
+Fixed vs Fixed-Warmup               & 0.73  & 0.31 \\
+Fixed-Warmup vs Warmup              & 0.26  & 1.15 \\
+Fixed-Warmup vs No-Warmup           & 0.053 & 0.93 \\
+Warmup vs No-Warmup                 & 0.090 & 0.80 \\
+No-Warmup vs Constant-V             & 0.84  & $-0.15$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The large effect sizes confirm that the absent significance is a power
+problem, not a null result. The pooled Fix-A vs default test is what allows
+the diagnostic claim to be made statistically.
+
+\subsection{Fix-A\,+\,B (Fixed) Seed 1: First Classical-Quality Quantum
+            Value Function}
+
+Quantum-Fixed seed~1 satisfies all four classical-quality criteria
+simultaneously:
+\begin{itemize}
+  \item $P(A{<}0) = 0.744$---above the IQL target $\tau=0.70$ and within
+        0.04 of the best classical seeds (0.701, 0.714).
+  \item $\mathcal{L}(V)_\text{final} = 2.0$---within a factor of $1.8\times$
+        of classical's $1.12\pm0.34$.
+  \item $\mathbb{E}[A] = -0.87$---negative, correct direction, magnitude
+        consistent with classical ($-0.64$ to $-1.61$).
+  \item $b_\text{final}=378.2$, $a_\text{final}=58.5$, giving
+        $V\in[370.8,\,384.9]$ centred at $\bar V=378$---matching the
+        classical mean of 377 and the correct-scale criterion, with
+        state-dependent slope within 1.1$\times$ of classical's
+        $\sigma\approx55$.
+\end{itemize}
+
+This is the only seed across the 17 quantum runs in this study (3+8+3+3) to
+satisfy all four criteria simultaneously.
+The next-closest is Fixed-Warmup seed~1, which matches on $\mathcal{L}(V)$
+and $b$ but is over-target on $P(A{<}0)$ and has $a=6.4$ (far smaller than
+classical's slope), indicating the circuit's state-dependence is suppressed
+when warmup is retained.
+This proof-of-concept establishes that the DRU architecture is not inherently
+incompatible with IQL value learning; the failures were in the training
+configuration.
+
+\subsection{Failure Mode A: Initial Value-Loss Shock (Fixed Seed 0)}
+
+With $V_0(s)\approx374$ and $Q_0(s,a)\approx0$ (random critic initialisation),
+the expectile loss at step~0 is approximately
+$\mathcal{L}(V)_0 \approx \tau\cdot374^2\approx98\,000$.
+Gradient clipping at unit max-norm preserves gradient direction but not
+magnitude, so the optimiser takes approximately 10\,000 unit-norm steps all
+pointing in the same direction before $Q$ has bootstrapped to the correct
+scale. The result is systematic overshoot: $b_\text{final}=455$, 22\% above
+the target 374.
+
+This is a third failure mode, distinct from those previously identified:
+(i)~warmup's 1-layer barren plateau; (ii)~no-warmup's multi-layer chaotic
+initialisation; (iii)~\textbf{cold-start value-loss shock} from the V-Q
+bootstrap gap.
+The natural remedy is \textbf{Fix~C}: freeze the value gradient for the first
+1\,000--2\,000 steps, allowing $Q$ to bootstrap toward
+$r+\gamma b_0\approx374$ before $V$ begins updating. This would reduce
+$\mathcal{L}(V)_0$ from $\sim$98\,000 to $\sim$0, eliminating the overshoot
+without any architectural change.
+Fix~C is untested within the scope of this report.
+
+\subsection{Failure Mode B: Correct Scale, Absent State-Dependence
+            (Fixed Seed 2)}
+
+Seed~2 correctly learns the scale ($b_\text{final}=380.6\approx374$) but
+converges to near-zero slope ($a_\text{final}=2.6$), producing
+$V\in[378.1,\,383.2]$---a constant at the right level.
+$P(A{<}0)=0.534$: direction-correct (above 0.5) but below the on-target band.
+Gradient norms collapse to near zero late in training
+($\|\nabla\theta\|_\text{late}=2.1$), indicating convergence to a flat local
+minimum in circuit parameter space.
+The circuit has solved the scale problem but not the state-discrimination
+problem.
+Fix~C combined with a slightly larger initial $a$ may improve this seed by
+providing a better-conditioned starting point for the slope parameter.
+
+\subsection{Fix A Isolation: What Does Removing the Warmup Add?}
+
+Comparing the two Fix-A variants directly:
+
+\begin{itemize}
+  \item Returns are statistically indistinguishable: Fixed $3526\pm29$
+        vs Fixed-Warmup $3512\pm42$, Welch $p=0.73$, $d=0.31$.
+  \item \textbf{Advantage sign}: all three Fixed-Warmup seeds achieve
+        $\mathbb{E}[A]<0$ ($-0.70$, $-0.77$, $-0.42$), compared to 2/3 for
+        Fixed (seeds 1 and 2 negative, seed 0 positive at $+5.91$).
+        Both Fix-A variants outperform default-init in this criterion
+        (warmup: 0/3 negative; no-warmup: 2/8 negative).
+  \item \textbf{Magnitude}: Fixed-Warmup advantage means cluster tightly
+        ($\mathbb{E}[A]\in[-0.42,\,-0.77]$), while Fixed shows larger spread
+        ($[-0.58,\,+5.91]$). The warmup schedule's phase-by-phase activation
+        appears to suppress the initial V-Q shock that causes seed~0's
+        large positive $\mathbb{E}[A]$ in Fixed.
+  \item Direction-correct calibration ($P(A{<}0)>0.5$): Fixed 2/3 vs
+        Fixed-Warmup 3/3 (Fisher exact $p=1.0$, indistinguishable at this
+        sample size).
+  \item Over-calibration ($P>0.8$): Fixed 0/3 vs Fixed-Warmup 2/3.
+        Fisher exact $p=0.40$---suggestive but not significant.
+\end{itemize}
+
+The negative $\mathbb{E}[A]$ in all Fixed-Warmup seeds confirms that Fix~A
+(correct scale initialisation) achieves the correct IQL optimisation
+direction reliably, regardless of whether the warmup schedule is retained.
+The descriptive pattern is consistent with a hypothesis that retaining the
+warmup schedule alongside Fix~A causes the multi-layer circuit to begin
+optimising with $b$ already near 374 and $Q$ still bootstrapping, allowing
+$V$ to overshoot $Q$ before $Q$ rises---producing the observed
+over-calibration in 2/3 Fixed-Warmup seeds and the tight negative $\mathbb{E}[A]$
+cluster. However, with 3 seeds per arm,
+this hypothesis is not statistically testable; it is a candidate for the
+follow-up seed expansion to $n=8$.
+
+A more conservative reading of the current data: \textbf{Fix~A is the
+intervention that does the work}. Removing the warmup additionally (Fix~B)
+produces a small, statistically undetectable improvement in calibration
+centring and a small, statistically undetectable degradation in gradient
+peaks (Fixed seeds reach $\|\nabla\theta\|_\text{max}$ up to 851; Fixed-Warmup
+peaks at 327). Both variants explode at the cold-start step and recover.
+Choosing between Fixed and Fixed-Warmup as the recommended configuration
+requires more seeds.
+
+\paragraph{Implication for the no-warmup analysis.}
+The fact that Fix-A combined with the warmup schedule still produces 5/6
+direction-correct calibration across the two Fix-A variants reframes the
+no-warmup result. The warmup schedule on its own---without correct scale
+initialisation---is incompatible with IQL value learning (Section 4).
+But once the affine bias is correctly initialised, the warmup schedule is
+no longer fatal; it is merely suboptimal. The dominant problem in the
+original report was scale, not schedule.
+
+%──────────────────────────────────────────────────────────────────────────────
+\section{Statistical Significance Summary}
+\label{sec:stats}
+
+The conclusions of this study rest on the following statistical evidence,
+ordered by strength.
+
+\paragraph{Conventionally significant ($p<0.05$).}
+\begin{enumerate}
+  \item \textbf{Fix-A pool versus default-init pool, return.}
+        Welch's $t=2.34$, $\mathbf{p=0.041}$, $d=0.87$, $n_1{=}6$,
+        $n_2{=}11$. Mean returns $3519\pm40$ versus $2962\pm787$.
+  \item \textbf{Fix-A pool versus default-init pool, direction-correct
+        calibration.} Fisher exact two-sided $\mathbf{p=0.034}$,
+        5/6 (Wilson CI $[44\%,97\%]$) versus 2/11 (Wilson CI
+        $[5\%,48\%]$).
+\end{enumerate}
+
+\paragraph{Strong negative result.}
+\begin{enumerate}
+  \setcounter{enumi}{2}
+  \item \textbf{No-Warmup return is statistically indistinguishable from
+        Constant-V.} Welch's $t=-0.22$, $p=0.84$, $d=-0.15$. This
+        confirms that warmup removal alone produces a quantum agent whose
+        return distribution matches a frozen scalar baseline, supporting the
+        diagnostic claim that scale correction (not schedule modification)
+        is the active intervention.
+\end{enumerate}
+
+\paragraph{Borderline ($0.05<p<0.10$, large effect size).}
+\begin{enumerate}
+  \setcounter{enumi}{3}
+  \item \emph{Fixed vs No-Warmup return}: $p=0.050$, $d=0.95$.
+  \item \emph{Fixed-Warmup vs No-Warmup return}: $p=0.053$, $d=0.93$.
+  \item \emph{Warmup vs No-Warmup return}: $p=0.090$, $d=0.80$.
+        Treated descriptively rather than significantly throughout.
+\end{enumerate}
+
+\paragraph{Underpowered (large effect, no significance).}
+Pairwise tests at n=3 versus n=3 (Fixed vs Warmup, Fixed-Warmup vs Warmup,
+Fixed vs Fixed-Warmup, gradient explosion comparisons, on-target calibration
+comparisons) do not reach significance despite Cohen's $d$ values up to 1.35.
+These should be read as observations consistent with the hypothesised effects,
+not as confirmed effects.
+
+\paragraph{Wilson 95\% confidence intervals for key proportions.}
+
+\begin{center}
+\setlength{\tabcolsep}{8pt}
+\begin{tabular}{lll}
+\toprule
+Quantity & Point estimate & 95\% Wilson CI \\
+\midrule
+Warmup direction-correct                & 0/3 = 0\%    & $[0\%,\,56\%]$ \\
+No-Warmup direction-correct             & 2/8 = 25\%   & $[7\%,\,59\%]$ \\
+No-Warmup on-target $[0.6,0.8]$         & 1/8 = 12.5\% & $[2\%,\,47\%]$ \\
+Fixed direction-correct                 & 2/3 = 67\%   & $[21\%,\,94\%]$ \\
+Fixed on-target                         & 1/3 = 33\%   & $[6\%,\,79\%]$ \\
+Fixed-Warmup direction-correct          & 3/3 = 100\%  & $[44\%,\,100\%]$ \\
+Fixed-Warmup over-calibrated $({>}0.8)$ & 2/3 = 67\%   & $[21\%,\,94\%]$ \\
+\textbf{Fix-A pool direction-correct}   & \textbf{5/6 = 83\%} & $\mathbf{[44\%,\,97\%]}$ \\
+Default-init direction-correct          & 2/11 = 18\%  & $[5\%,\,48\%]$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The CIs make clear that single-cell rates at n=3 are not pinned down within
+useful bounds, and the strongest claim the data supports is the contrast
+between the pooled Fix-A and default-init proportions.
+
+%──────────────────────────────────────────────────────────────────────────────
+\section{Conclusions}
+
+\textbf{(1) The quantum $V(s)$ does not function as an IQL value function in
+its default configuration.}
+All three warmup seeds produce $P(A{<}0)\in[0.08,\,0.42]$ against the required
+$\approx0.70$, with $V$ sitting below the mean of $Q$ rather than above it.
+The structural cause is an affine output head that cannot reach the correct
+value scale ($\approx374$) from a zero-centred initialisation.
+
+\textbf{(2) The default quantum system degenerates to Q-only reward-weighted
+behavioural cloning.}
+Constant-V ($V\equiv100$, zero parameters) achieves 83.6\% of classical
+performance and produces advantage statistics indistinguishable from the
+warmup quantum agent. Both operate in the regime $Q\approx r+\gamma c$,
+$A\approx r-c(1-\gamma)$, with the actor upweighting high-reward transitions.
+The crispest demonstration is the Welch test on No-Warmup versus Constant-V
+returns ($p=0.84$): removing the warmup without correcting scale produces a
+quantum agent indistinguishable from a frozen scalar.
+
+\textbf{(3) Competitive return in the default configuration is a property of
+the task, not the circuit.}
+Hopper-medium's dense reward, positive correlation with locomotion quality,
+and narrow dataset distribution make reward-weighted BC competitive with full
+IQL.
+
+\textbf{(4) Depth is the relevant inductive bias, not parameter count.}
+Classical-Deep $[8,8,8]$ (249 params, depth~3) achieves 99.1\% of classical
+performance reliably (CV\,=\,0.2\%); Classical-Small $[11]$ (144 params,
+depth~1) fails with CV\,=\,56.4\%.
+The DRU circuit has effective depth~3; the fair classical comparison is
+depth-matched, and depth-3 classical wins decisively.
+
+\textbf{(5) Warmup removal alone does not rescue the quantum agent.}
+At $n=8$, no-warmup produces mean return $2794\pm817$ (CV\,=\,29.2\%), 12\%
+below warmup ($p=0.090$, $d=0.80$) and \emph{statistically indistinguishable
+from Constant-V} ($p=0.84$).
+Direction-correct calibration is achieved in 2/8 seeds (Wilson CI
+$[7\%,59\%]$), on-target in 1/8 (CI $[2\%,47\%]$).
+At threshold $\|\nabla\theta\|_\text{max}>50$, gradient explosion occurs in
+5/8 no-warmup runs versus 1/3 warmup runs (Fisher $p=0.55$, descriptive).
+The warmup schedule was designed for stationary loss landscapes (VQE,
+supervised quantum models) and is incompatible with IQL's continuously
+shifting V-Q bootstrapping loop, but removing it without scale correction
+makes things worse, not better.
+
+\textbf{(6) Fix~A (correct scale initialisation) is the dominant intervention,
+with conventionally significant statistical support.}
+Pooling the two Fix-A configurations (Fixed and Fixed-Warmup, $n=6$) against
+the two default-init configurations (Warmup and No-Warmup, $n=11$):
+
+\begin{itemize}
+  \item Return: $3519\pm40$ vs $2962\pm787$, Welch $\mathbf{p=0.041}$,
+        $d=0.87$.
+  \item Direction-correct calibration: 5/6 vs 2/11, Fisher exact
+        $\mathbf{p=0.034}$.
+\end{itemize}
+
+These are the only conventionally significant comparisons in the study.
+They establish that the DRU architecture is not inherently incompatible with
+IQL value learning---the failures were in the training configuration.
+
+\textbf{(7) Fix~B (warmup removal in addition to Fix~A) is statistically
+undetectable at this sample size.}
+Within the Fix-A pool, Fixed and Fixed-Warmup are statistically
+indistinguishable in return (Welch $p=0.73$, $d=0.31$) and in direction-correct
+rate (Fisher $p=1.0$).
+Descriptively, Fixed-Warmup tends to over-calibrate (2/3 seeds with
+$P(A{<}0){>}0.8$, Fisher $p=0.40$ versus Fixed) while Fixed lands centred
+(seed~1 at $P(A{<}0){=}0.744$).
+The over-calibration tendency is a candidate hypothesis for follow-up seed
+expansion; with $n=3$ per arm, it is not yet established.
+
+\textbf{(8) Fixed seed 1 is the only seed in the study to satisfy all four
+classical-quality criteria simultaneously.}
+On-target $P(A{<}0)=0.744$, $\mathcal{L}(V)=2.0$ (within $1.8\times$ of
+classical), correct $b_\text{final}=378.2$ matching the dataset value scale,
+and state-dependent $a_\text{final}=58.5$ within $1.1\times$ of classical's
+slope. This is a proof of concept that the DRU architecture can function as
+an IQL value network when correctly initialised. The 1/3 (Wilson CI
+$[6\%,79\%]$) on-target rate at Fixed (or 1/6 across the Fix-A pool) is
+imprecisely estimated; reproducibility requires expansion.
+
+\textbf{(9) A third failure mode identifies the next concrete intervention.}
+Fixed seed~0 fails via cold-start value-loss shock:
+$\mathcal{L}(V)_0\approx\tau\cdot374^2\approx98\,000$ drives 10\,000
+clipped unit-norm gradient steps before $Q$ bootstraps to the correct scale,
+causing systematic overshoot ($b_\text{final}=455$).
+\textbf{Fix~C}---freezing the value gradient for 1\,000--2\,000 steps to
+allow prior $Q$ bootstrapping---is predicted to resolve this without any
+architectural change. Fix~C is untested in this report.
+
+\textbf{(10) The diagnostic chain has a constructive resolution, with
+provisional statistical support.}
+\begin{enumerate}
+  \item \emph{Constant-V ablation ($n=3$)}: confirmed $V$ is a passenger in
+        the original configuration (83.6\% of classical at zero parameter
+        cost).
+  \item \emph{No-warmup ablation ($n=8$)}: showed warmup removal alone
+        produces returns indistinguishable from Constant-V ($p=0.84$),
+        with direction-correct rate 2/8 ($[7\%,59\%]$) and on-target rate
+        1/8 ($[2\%,47\%]$).
+  \item \emph{Fix-A only (Fixed-Warmup, $n=3$)}: correct scale initialisation
+        alone restores competitive return (CV\,=\,1.2\%) and direction-correct
+        calibration in 3/3 seeds, with 2/3 over-calibrated.
+  \item \emph{Fix-A\,+\,B (Fixed, $n=3$)}: produces seed~1, the only run
+        in the study to satisfy all four classical-quality criteria
+        simultaneously.
+\end{enumerate}
+The pooled Fix-A vs default contrast (Welch $p=0.041$, Fisher $p=0.034$) is
+the principal statistical evidence.
+
+The remaining failure mode (cold-start overshoot) is mechanistically
+understood and has a concrete, untested remedy (Fix~C).
+Full statistical validation requires seed expansion to $n\geq8$ for both
+Fix-A variants and Fix-C evaluation.
+Task-transfer validation to a sparse-reward environment (e.g.\
+\texttt{antmaze-medium-play}) where the value function is non-optional
+is the essential next step to determine whether these improvements persist
+beyond Hopper-medium's forgiving task structure.
+
+%──────────────────────────────────────────────────────────────────────────────
+\begin{thebibliography}{9}
+\bibitem{kostrikov2021}
+I.~Kostrikov, A.~Nair, and S.~Levine,
+``Offline Reinforcement Learning with Implicit Q-Learning,''
+\textit{ICLR}, 2022.
+
+\bibitem{skolik2021}
+A.~Skolik, J.~J.~McClean, M.~Mohseni, P.~van der Smagt, and M.~Leib,
+``Layerwise learning for quantum neural networks,''
+\textit{Quantum Machine Intelligence}, 3(1):5, 2021.
+\end{thebibliography}
+
+\end{document}

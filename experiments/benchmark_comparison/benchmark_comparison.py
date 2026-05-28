@@ -94,6 +94,7 @@ import wandb  # noqa: E402
 from quantum_iql.buffer import load_minari_dataset  # noqa: E402
 from quantum_iql.quantum_config import (  # noqa: E402
     LayerwiseScheduleEntry,
+    make_layerwise_schedule,
     QuantumIQLConfig,
     QuantumNetConfig,
 )
@@ -216,13 +217,7 @@ def _matched_hidden_dim(obs_dim: int) -> list[int]:
 
 def _make_schedule(total_steps: int) -> list[LayerwiseScheduleEntry]:
     """Return a layerwise schedule proportional to total_steps."""
-    l2 = max(1, round(total_steps * 0.10))
-    l3 = max(l2 + 1, round(total_steps * 0.30))
-    return [
-        LayerwiseScheduleEntry(start_step=0,  active_layers=1),
-        LayerwiseScheduleEntry(start_step=l2, active_layers=2),
-        LayerwiseScheduleEntry(start_step=l3, active_layers=3),
-    ]
+    return make_layerwise_schedule(total_steps)
 
 
 # ── Experiment spec ──────────────────────────────────────────────────────────

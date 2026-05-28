@@ -39,8 +39,19 @@ def get_device(device_str: str) -> torch.device:
     return torch.device(device_str)
 
 
+_ROBOTICS_REGISTERED: bool = False
+
+
 def make_env(env_id: str, seed: int) -> gym.Env:
     """Create and seed a Gymnasium environment."""
+    global _ROBOTICS_REGISTERED
+    if not _ROBOTICS_REGISTERED:
+        try:
+            from gymnasium_robotics import register_robotics_envs
+            register_robotics_envs()
+        except Exception:
+            pass
+        _ROBOTICS_REGISTERED = True
     env = gym.make(env_id)
     env.reset(seed=seed)
     env.action_space.seed(seed)

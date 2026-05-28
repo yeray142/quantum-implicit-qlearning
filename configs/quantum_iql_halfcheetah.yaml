@@ -1,0 +1,73 @@
+# configs/quantum_iql_halfcheetah.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared config for the hybrid Q-IQL ablation on HalfCheetah.
+# Switch between classical and quantum arms with a single override:
+#
+#   mode=classical   → standard IQL with MLP value network
+#   mode=quantum     → DRU quantum circuit replaces V(s); Q and π stay classical
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+mode: "classical"   # "classical" | "quantum"
+
+dataset_id: "mujoco/halfcheetah/medium-v0"
+env_id: "HalfCheetah-v4"
+
+tau: 0.7
+beta: 3.0
+gamma: 0.99
+polyak: 0.005
+
+lr_v: 3.0e-4
+lr_q: 3.0e-4
+lr_actor: 3.0e-4
+lr_quantum: 1.0e-3
+quantum_grad_clip: 1.0
+
+batch_size: 256
+num_steps: 1_000_000
+warmup_steps: 0
+
+value_net:
+  hidden_dims: [256, 256]
+  activation: relu
+  layer_norm: false
+
+critic_net:
+  hidden_dims: [256, 256]
+  activation: relu
+  layer_norm: false
+
+actor_net:
+  hidden_dims: [256, 256]
+  activation: relu
+  layer_norm: false
+
+use_twin_critic: true
+advantage_clip: 100.0
+
+quantum_value:
+  n_qubits: 8
+  n_layers: 3
+  device_name: "lightning.qubit"
+  running_stats: true
+  layerwise_schedule:
+    - start_step: 0
+      active_layers: 1
+    - start_step: 100000
+      active_layers: 2
+    - start_step: 300000
+      active_layers: 3
+
+log_quantum_metrics: true
+stats_update_interval: 1000
+
+log_interval: 1000
+eval_interval: 10000
+eval_episodes: 10
+wandb_project: "quantum-iql"
+wandb_run_name: null
+wandb_offline: false
+
+seed: 0
+device: "auto"

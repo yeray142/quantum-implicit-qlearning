@@ -14,6 +14,7 @@ dependencies = [
     "numpy>=1.26",
     "gymnasium[mujoco]>=0.29",
     "minari[all]>=0.5",
+    "shimmy>=2.0",
     "wandb>=0.17",
     "pennylane>=0.38",
     "pyyaml>=6.0",

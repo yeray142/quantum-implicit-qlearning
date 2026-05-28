@@ -4,7 +4,12 @@ Ablation Study: Diagnosing and Fixing V(s) in Hybrid Q-IQL
 ===========================================================
 
 Phase 1 (diagnostic):
-  constant-v        -- V(s) ≡ 100 (frozen). Decisive test of V contribution.
+  constant-v        -- V(s) ≡ env_cfg.v_constant (frozen, default 100).
+                       Decisive test of V contribution. Per-env override
+                       v_constant ≈ E[Q] under the dataset to neutralize
+                       percentile-filter biases and isolate the genuine
+                       question: "does state-CONDITIONAL V learning add
+                       anything beyond a flat mean baseline?".
   classical-deep    -- Depth-3 MLP [8,8,8], depth-matched to DRU.
   quantum-no-warmup -- All 3 DRU layers active from step 0.
 
@@ -13,6 +18,18 @@ Phase 2 (repair):
                             The primary repair experiment.
   quantum-fixed-warmup   -- Fix A only; keeps the Skolik warm-up schedule.
                             Isolates the effect of affine-head initialisation.
+  quantum-fixed-c        -- Fix A + Fix B + Fix C: V-gradient freeze for first 1500 steps.
+                            Allows Q to bootstrap toward r + γ·374 before V begins moving.
+
+Experiment 2 (structural test):
+  quantum-multi-qubit-readout -- Replace V(s) = a·⟨Z₀⟩+b with V(s) = Σᵢ aᵢ⟨Zᵢ⟩+b
+                            (8 trainable readout coefficients, +7 params).
+                            Run with Fix A+B+C at n=8. The architectural-ceiling
+                            hypothesis predicts on-target rate should rise above 6/8
+                            and seeds should reliably approach τ=0.70 from below.
+
+Experiment 3 (classical baseline):
+  classical          -- Standard classical IQL with seeds 0-7 for proper statistical power.
 
 Usage
 -----
@@ -20,11 +37,13 @@ Usage
   python experiments/ablation_study.py
 
   # Repair experiments on Hopper, seeds 0-7:
-  python experiments/ablation_study.py --modes quantum-fixed --seeds 0 1 2 3 4 5 6 7
+  python experiments/ablation_study.py --modes quantum-fixed quantum-fixed-c --seeds 0 1 2 3 4 5 6 7
 
-  # Transfer: quantum-fixed + baseline on Walker2d:
-  python experiments/ablation_study.py --modes quantum-fixed constant-v classical \\
-      --env walker2d --seeds 0 1 2
+  # Multi-qubit readout experiment (Fix A+B+C, n=8):
+  python experiments/ablation_study.py --modes quantum-multi-qubit-readout --seeds 0 1 2 3 4 5 6 7
+
+  # Classical baseline n=8 with proper seed count:
+  python experiments/ablation_study.py --modes classical --seeds 0 1 2 3 4 5 6 7
 
   # Dry-run:
   python experiments/ablation_study.py --dry-run
@@ -36,6 +55,8 @@ import argparse
 import sys
 from pathlib import Path
 
+import gymnasium as gym
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -48,17 +69,24 @@ import wandb
 
 from quantum_iql.buffer import load_minari_dataset
 from quantum_iql.networks import ActorNetwork, CriticNetwork, ValueNetwork
-from quantum_iql.quantum_config import LayerwiseScheduleEntry, QuantumIQLConfig, QuantumNetConfig
+from quantum_iql.quantum_config import (
+    LayerwiseScheduleEntry,
+    make_layerwise_schedule,
+    QuantumIQLConfig,
+    QuantumNetConfig,
+)
 from quantum_iql.trainer import IQLTrainer
 from quantum_iql.utils import make_env, set_seed
+
+from experiment_utils import estimate_sps, estimate_runtime, measure_sps, print_grid_summary
 
 _EXPERIMENTS_DIR = Path(__file__).resolve().parent
 _BC_PATH = _EXPERIMENTS_DIR / "benchmark_comparison" / "benchmark_comparison.py"
 import importlib.util as _ilu
 _bc_spec = _ilu.spec_from_file_location("benchmark_comparison", _BC_PATH)
-_bc = _ilu.module_from_spec(_bc_spec)   # type: ignore[arg-type]
+_bc = _ilu.module_from_spec(_bc_spec)
 sys.modules["benchmark_comparison"] = _bc
-_bc_spec.loader.exec_module(_bc)        # type: ignore[union-attr]
+_bc_spec.loader.exec_module(_bc)
 BenchmarkTrainer = _bc.BenchmarkTrainer
 _count_params    = _bc._count_params
 
@@ -75,38 +103,25 @@ _ENV_REGISTRY: dict[str, dict] = {
         "a_init":  55.0,
         "group":  "hopper-medium",
     },
-    "walker2d": {
-        "dataset_id": "mujoco/walker2d/medium-v0",
-        "env_id":     "Walker2d-v4",
-        "tau":   0.7,
-        "beta":  3.0,
-        "v_init": 595.5,   # 5.955 / 0.01
-        "a_init":  55.0,
-        "group":  "walker2d-medium",
-    },
 }
 
 # ── Shared constants ──────────────────────────────────────────────────────────
-V_CONSTANT   = 100.0          # constant used in constant-v ablation
+V_CONSTANT   = 100.0          # default for constant-v ablation;
+                              # overridden per-env via env_cfg["v_constant"]
 NUM_STEPS    = 100_000
 EVAL_INTERVAL= 5_000
 LOG_INTERVAL = 1_000
 WANDB_PROJECT= "quantum-iql"
 DEEP_HIDDEN  = [8, 8, 8]
 
-_SPS_ESTIMATE = {
-    "constant-v":             300.0,
-    "classical":              175.0,
-    "classical-deep":         280.0,
-    "quantum-no-warmup":       12.2,
-    "quantum-fixed":           12.2,
-    "quantum-fixed-warmup":    12.2,
-}
-
-ALL_MODES = list(_SPS_ESTIMATE.keys())
+ALL_MODES = [
+    "constant-v", "classical", "classical-deep",
+    "quantum-no-warmup", "quantum-fixed", "quantum-fixed-warmup", "quantum-fixed-c",
+    "quantum-multi-qubit-readout",
+]
 
 
-# ── ConstantValueNetwork ──────────────────────────────────────────────────────
+# ── ConstantV trainer ─────────────────────────────────────────────────────────
 
 class ConstantValueNetwork(nn.Module):
     """V(s) = constant for all s. No trainable parameters."""
@@ -121,14 +136,13 @@ class ConstantValueNetwork(nn.Module):
         return self.constant.expand(obs.shape[0], 1)
 
 
-# ── ConstantV trainer ─────────────────────────────────────────────────────────
-
 class ConstantVIQLTrainer(IQLTrainer):
     """IQL with V frozen at a constant. V update is a no-op."""
 
-    def __init__(self, config, buffer, env, checkpoint_dir: Path) -> None:
+    def __init__(self, config, buffer, env, checkpoint_dir: Path,
+                 v_constant: float = V_CONSTANT) -> None:
         self._checkpoint_dir = checkpoint_dir
-        self._v_constant = V_CONSTANT
+        self._v_constant = v_constant
         super().__init__(config, buffer, env)
 
     def _build_networks(self) -> None:
@@ -238,13 +252,7 @@ def _base_config(seed: int, env_cfg: dict) -> QuantumIQLConfig:
 
 def _warmup_schedule(total_steps: int) -> list[LayerwiseScheduleEntry]:
     """10%→L2, 30%→L3 proportional schedule (original benchmark config)."""
-    l2 = max(1, round(total_steps * 0.10))
-    l3 = max(l2 + 1, round(total_steps * 0.30))
-    return [
-        LayerwiseScheduleEntry(start_step=0,  active_layers=1),
-        LayerwiseScheduleEntry(start_step=l2, active_layers=2),
-        LayerwiseScheduleEntry(start_step=l3, active_layers=3),
-    ]
+    return make_layerwise_schedule(total_steps)
 
 
 def _quantum_cfg(use_warmup: bool, total_steps: int) -> QuantumNetConfig:
@@ -292,6 +300,23 @@ def _build_config(mode: str, seed: int, env_cfg: dict) -> QuantumIQLConfig:
         cfg.quantum_value = _quantum_cfg(use_warmup=True, total_steps=NUM_STEPS)
         cfg.quantum_batch_size = 256
 
+    elif mode == "quantum-fixed-c":
+        cfg.mode = "quantum"
+        cfg.quantum_value = _quantum_cfg(use_warmup=False, total_steps=NUM_STEPS)
+        cfg.quantum_batch_size = 256
+        # Fix C: freeze V gradient for first v_freeze_steps to mitigate cold-start overshoot
+        cfg.fix_c_enabled  = True
+        cfg.v_freeze_steps = 1500
+
+    elif mode == "quantum-multi-qubit-readout":
+        cfg.mode = "quantum"
+        cfg.quantum_value = _quantum_cfg(use_warmup=False, total_steps=NUM_STEPS)
+        cfg.quantum_value.multi_qubit_readout = True
+        cfg.quantum_batch_size = 256
+        # Fix C: freeze V gradient for first v_freeze_steps to mitigate cold-start overshoot
+        cfg.fix_c_enabled = True
+        cfg.v_freeze_steps = 1500
+
     else:
         raise ValueError(f"Unknown mode: {mode!r}")
 
@@ -303,18 +328,22 @@ def _build_config(mode: str, seed: int, env_cfg: dict) -> QuantumIQLConfig:
 def run_ablation(mode: str, seed: int, env_name: str,
                  wandb_offline: bool = False) -> None:
     env_cfg   = _ENV_REGISTRY[env_name]
-    dataset_q = env_cfg["dataset_id"].split("/")[-1].replace("-v0", "")  # "medium"
+    dataset_q = env_cfg["dataset_id"].split("/")[-1].replace("-v0", "")  # e.g. "umaze-expert"
     run_name  = f"{mode}-{env_name}-{dataset_q}-s{seed}"
     group     = env_cfg["group"]
     v_init    = env_cfg["v_init"]
     a_init    = env_cfg["a_init"]
+    v_constant   = env_cfg.get("v_constant",   V_CONSTANT)
+    reward_shift = env_cfg.get("reward_shift", 0.0)
 
     print(f"\n{'='*65}")
     print(f"  {run_name}  ({NUM_STEPS:,} steps)")
     print(f"{'='*65}")
 
     set_seed(seed)
-    buffer = load_minari_dataset(env_cfg["dataset_id"], device="cpu")
+    buffer = load_minari_dataset(
+        env_cfg["dataset_id"], device="cpu", reward_shift=reward_shift,
+    )
     cfg    = _build_config(mode, seed, env_cfg)
 
     checkpoint_dir = (
@@ -330,7 +359,8 @@ def run_ablation(mode: str, seed: int, env_name: str,
             "seed": seed,
             "v_init": v_init if "fixed" in mode else None,
             "a_init": a_init if "fixed" in mode else None,
-            "v_constant": V_CONSTANT if mode == "constant-v" else None,
+            "v_constant":   v_constant if mode == "constant-v" else None,
+            "reward_shift": reward_shift if reward_shift != 0.0 else None,
         },
         mode="offline" if wandb_offline else "online",
         reinit=True,
@@ -340,10 +370,11 @@ def run_ablation(mode: str, seed: int, env_name: str,
     set_seed(seed, env=gymnasium_env)
 
     if mode == "constant-v":
-        trainer = ConstantVIQLTrainer(cfg, buffer, gymnasium_env, checkpoint_dir)
+        trainer = ConstantVIQLTrainer(cfg, buffer, gymnasium_env, checkpoint_dir,
+                                      v_constant=v_constant)
         v_params = 0
 
-    elif mode in ("quantum-fixed", "quantum-fixed-warmup"):
+    elif mode in ("quantum-fixed", "quantum-fixed-warmup", "quantum-fixed-c", "quantum-multi-qubit-readout"):
         trainer = QuantumFixedTrainer(
             cfg, buffer, gymnasium_env, checkpoint_dir,
             v_init=v_init, a_init=a_init,
@@ -357,8 +388,18 @@ def run_ablation(mode: str, seed: int, env_name: str,
     wandb.config.update({
         "value_net_params": v_params,
         "v_init_actual": v_init if "fixed" in mode else None,
+        "fix_c_enabled": cfg.fix_c_enabled if "fixed-c" in mode else None,
+        "v_freeze_steps": cfg.v_freeze_steps if "fixed-c" in mode else None,
     }, allow_val_change=True)
     print(f"  value_net params : {v_params}")
+
+    # ── Inline SPS measurement (first run of this mode in this process) ─────────
+    # Re-use measured value if already cached; otherwise run 50-step warmup.
+    from experiment_utils import _MEASURED_SPS as _sps_cache
+    if mode not in _sps_cache:
+        print(f"  [SPS benchmark] running 50-step warmup...")
+        measured = measure_sps(mode, cfg, steps=50)
+        print(f"  [SPS benchmark] measured = {measured:.1f} steps/s  (cached for remaining runs)")
 
     trainer.train()
     gymnasium_env.close()
@@ -380,29 +421,30 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--env", default="hopper", choices=list(_ENV_REGISTRY),
-        help="Environment (default: hopper). Use 'walker2d' for transfer test.",
+        help="Environment (default: hopper).",
     )
     p.add_argument("--seeds",         nargs="+", type=int, default=[0, 1, 2])
     p.add_argument("--wandb-offline", action="store_true")
     p.add_argument("--dry-run",       action="store_true")
+    p.add_argument("--num-steps",     type=int, default=None,
+                   help="Override NUM_STEPS (default: 100_000). Example: --num-steps 1000000")
     return p.parse_args()
 
 
 def main() -> None:
+    global NUM_STEPS
     args    = parse_args()
+    if args.num_steps is not None:
+        NUM_STEPS = args.num_steps
+
     env_cfg = _ENV_REGISTRY[args.env]
 
     grid = [(mode, seed) for mode in args.modes for seed in args.seeds]
 
-    print(f"\nQ-IQL Ablation Study  —  {len(grid)} run(s)  [{args.env}]\n")
-    print(f"  {'#':>3}  {'mode':<24}  {'seed':>4}  {'~min':>7}")
-    print(f"  {'─'*47}")
-    for i, (mode, seed) in enumerate(grid, 1):
-        mins = NUM_STEPS / _SPS_ESTIMATE.get(mode, 200) / 60
-        print(f"  {i:>3}  {mode:<24}  {seed:>4}  {mins:>6.1f}m")
+    def _cfg_for_mode(mode: str):
+        return _build_config(mode, seed=0, env_cfg=env_cfg)
 
-    total_min = sum(NUM_STEPS / _SPS_ESTIMATE.get(m, 200) / 60 for m, _ in grid)
-    print(f"\n  Total ≈ {total_min:.0f} min ({total_min/60:.1f} h)")
+    print_grid_summary(grid, NUM_STEPS, _cfg_for_mode, args.env, env_cfg)
 
     if "quantum-fixed" in args.modes or "quantum-fixed-warmup" in args.modes:
         v_init = env_cfg["v_init"]

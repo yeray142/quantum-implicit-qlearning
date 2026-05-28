@@ -1,0 +1,32 @@
+{
+  "phase": "quantum_batch",
+  "batch_id": 25,
+  "states_indices": [
+    25
+  ],
+  "v_values": [
+    323.48608337402345
+  ],
+  "v_raw_expval": [
+    [
+      0.22,
+      -0.78,
+      -0.1,
+      -0.18,
+      -0.26,
+      -0.1,
+      0.16,
+      -0.02
+    ]
+  ],
+  "hqc_consumed": 13.0,
+  "shots": 100,
+  "n_qubits": 8,
+  "n_layers": 3,
+  "active_layers": 3,
+  "timestamp": "2026-05-17T12:20:15.839564+00:00",
+  "backend_info": {
+    "device": "helios",
+    "simulator": "qnexus"
+  }
+}
